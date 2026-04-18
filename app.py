@@ -1,26 +1,29 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║           GEO Score™ Content Generator — by Nico Fioretti                  ║
-║           Senior Python Developer & AI Cost Strategist Build               ║
+║     GEO Score™ Content Generator v2 — Alligator Edition                    ║
+║     Senior Python Developer & Prompt Engineer Build                        ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
-TOKEN SAVINGS STRATEGY:
+CHANGELOG v2:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. GEO_CRITERIA_CONSTANT: I criteri delle 8 dimensioni del file Excel sono
-   estratti UNA VOLTA e memorizzati come costante Python. Nessuna lettura
-   runtime del file, nessun token sprecato a rileggere l'Excel ogni call.
+OBJ 1 — BUG FIX JSON & OUTPUT TRONCATO
+  • max_tokens esplicito per modello (MODEL_MAX_TOKENS dict)
+  • Generazione Modulare: checkbox per sezione → 1 call per sezione
+    → output ~1200 tok max → nessun troncamento su Haiku/mini
+  • repair_json(): stack-based closer per { [ mancanti → salva output parziali
 
-2. ONE-SHOT GENERATION: Un'unica chiamata API genera Home + Servizio + FAQ
-   + Schema Markup in JSON strutturato. Invece di 4 chiamate separate
-   (~4× overhead di contesto), ne facciamo UNA con output delimitato.
-   Risparmio stimato: ~60-70% di token vs approccio multi-call.
+OBJ 2 — LOCAL SEO / SCHEMA
+  • Nuovi campi: Via/CAP/Città/Prov, GPS, griglia orari Lun-Dom
+  • build_final_schema() inietta tutto in LocalBusiness JSON-LD
+  • Auto-detect: LocalBusiness se indirizzo presente, Organization altrimenti
 
-3. SYSTEM PROMPT CONCENTRATO: Il system prompt inietta i criteri GEO come
-   regole imperative dense (~400 token fissi), non come prosa descrittiva.
-   Nessun testo "di cortesia" nel prompt.
+OBJ 3 — STYLE BRAND ALLIGATOR
+  • Campo "Esempi di Stile/Copy" nel debrief
+  • System prompt: regole Alligator (diretto, risultati, no trend vuoti)
+  • Analisi tono dagli esempi → replicato nei testi generati
 
-4. temperature=0.7: Creatività controllata senza degenerazioni verbose.
-   Istruzione esplicita: "NO intro, NO conclusioni, NO commenti fuori JSON".
+OBJ 4 — EFFICIENZA & COSTI
+  • claude-haiku-4-5-20251001 default (💰), claude-sonnet-4-6 premium (🔋)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -31,90 +34,64 @@ from typing import Optional
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 1: GEO CRITERIA CONSTANT
-# Estratto dal file GEO_Score_Nico_Fioretti.xlsx una tantum.
-# NON viene passato l'Excel all'API → risparmio massiccio di token.
-# Ogni run dell'app usa questa costante già compilata → 0 chiamate extra.
+# Estratto da GEO_Score_Nico_Fioretti.xlsx — hardcoded per 0 token overhead.
 # ─────────────────────────────────────────────────────────────────────────────
-GEO_CRITERIA = """
-GEO SCORE™ — 8 DIMENSIONI DI VISIBILITÀ AI (Nico Fioretti Framework):
-
-1. TECNICA: Crawlabilità AI bot (GPTBot/ClaudeBot non bloccati in robots.txt),
-   HTML rendering senza JS, link <a href> standard, Schema Markup JSON-LD
-   validato, velocità <3s (PageSpeed >70), HTTPS attivo.
-
-2. CONTENUTO: Risposta diretta entro i primi 2 paragrafi, valore originale
-   (non duplicato), prove ed evidenze numeriche (≥1 dato ogni 2 paragrafi),
-   cluster tematici collegati, copertura customer journey completa
-   (awareness→consideration→decision), statistiche settoriali aggiornate.
-
-3. IDENTITÀ: Nome brand consistente su tutti i canali, Organization Schema
-   con sameAs a LinkedIn/Wikipedia/Wikidata, allineamento descrizioni
-   cross-platform, associazione topic-brand nei motori AI, distinzione
-   da omonimi, profili autore collegati e verificabili.
-
-4. LEGGIBILITÀ: Incipit con risposta diretta (AI estrae chunk iniziali),
-   heading H2/H3 descrittivi (non creativi/vaghi), un'idea per paragrafo
-   (max 5 righe), claim autonomi comprensibili out-of-context, formati
-   strutturati (tabelle/FAQ/liste — citati 3× più spesso dall'AI),
-   sezioni indipendenti che non richiedono contesto precedente.
-
-5. AUTORITÀ: Menzioni su siti terzi del settore (ultimi 12 mesi),
-   claim supportati da fonti esterne verificabili, presenza su directory
-   e review platform (Trustpilot/Google Reviews), link a fonti
-   istituzionali (.gov/.edu), Digital PR attiva (guest post/interviste),
-   menzioni ripetute per topic target (≥5 risultati indipendenti).
-
-6. CREDIBILITÀ: Autori con bio+foto+LinkedIn visibili, claim con fonti
-   primarie citate (≥2-3/pagina), ricerca originale pubblicata
-   (survey/report/case study con numeri reali), sentiment online positivo,
-   trust signals on-site (Chi siamo, P.IVA, team reale, certificazioni),
-   dati originali citati da altri siti o risposte AI.
-
-7. UNICITÀ: Framework/metodo proprietario con nome proprio, differenziazione
-   in una frase chiara e coerente, zero cliché ("leader del settore",
-   "qualità eccellente", "soluzioni innovative") → sostituire con dati
-   concreti, differenziazione ripetuta ovunque (homepage/about/servizi/
-   profili esterni), concetti branded originali attribuiti al brand.
-
-8. FRESCHEZZA: Pagine chiave revisionate ogni 6 mesi, date visibili e
-   accurate (non manipolate), statistiche degli ultimi 12-18 mesi,
-   aggiornamento frequente su temi time-sensitive (AI/normative/prezzi),
-   gestione contenuti obsoleti (refresh/merge/redirect).
-
-SCORING: 0-2=Assente, 3-4=Parziale, 5-6=In sviluppo, 7-8=Buono, 9-10=Eccellente
-LIVELLI: 0-39%=AI-Invisible | 40-59%=AI-Emerging | 60-79%=AI-Visible | 80-100%=AI-Ready Leader
-"""
+GEO_CRITERIA = """GEO SCORE™ — 8 DIMENSIONI (Nico Fioretti):
+1.TECNICA: AI bot non bloccati in robots.txt, HTML senza JS, Schema JSON-LD valido, velocità<3s, HTTPS.
+2.CONTENUTO: Risposta diretta entro 2 paragrafi, dati originali, ≥1 numero ogni 2 paragrafi, cluster tematici, journey completo.
+3.IDENTITÀ: Nome brand consistente, sameAs schema, allineamento cross-platform, associazione topic-brand nei motori AI.
+4.LEGGIBILITÀ: Incipit con risposta, H2/H3 descrittivi, 1 idea/paragrafo, claim autonomi out-of-context, formati strutturati (3x citati).
+5.AUTORITÀ: Menzioni siti terzi, claim con fonti esterne, directory/review, link .gov/.edu, Digital PR attiva.
+6.CREDIBILITÀ: Autori con bio+LinkedIn, fonti citate ≥2-3/pagina, ricerca originale, trust signals on-site (P.IVA, team, cert.).
+7.UNICITÀ: Framework proprietario con nome, differenziazione in 1 frase, zero cliché→dati concreti, concetti branded attributi.
+8.FRESCHEZZA: Pagine chiave revisionate ogni 6 mesi, date accurate, statistiche ≤18 mesi, gestione contenuti obsoleti."""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 2: PRICING MODELS
-# Prezzi per 1K token (input/output) per stimare i costi prima di generare.
-# Aggiorna questi valori se i prezzi cambiano — sono hardcoded per rapidità.
+# SEZIONE 2: PRICING & MODEL CONFIG
+# OBJ 4: haiku = default economico, sonnet = premium
 # ─────────────────────────────────────────────────────────────────────────────
 PRICING = {
     "openai": {
-        "gpt-4o-mini":        {"input": 0.00015,  "output": 0.00060},
-        "gpt-4o":             {"input": 0.00250,  "output": 0.01000},
-        "gpt-4.1-mini":       {"input": 0.00040,  "output": 0.00160},
-        "gpt-4.1":            {"input": 0.00200,  "output": 0.00800},
+        "gpt-4o-mini":  {"input": 0.00015, "output": 0.00060},
+        "gpt-4o":       {"input": 0.00250, "output": 0.01000},
+        "gpt-4.1-mini": {"input": 0.00040, "output": 0.00160},
+        "gpt-4.1":      {"input": 0.00200, "output": 0.00800},
     },
     "anthropic": {
-        "claude-haiku-4-5-20251001":   {"input": 0.00025,  "output": 0.00125},
-        "claude-sonnet-4-6": {"input": 0.00300,  "output": 0.01500},
-        "claude-opus-4-6":   {"input": 0.01500,  "output": 0.07500},
+        "claude-haiku-4-5-20251001":  {"input": 0.00025, "output": 0.00125},
+        "claude-sonnet-4-6":          {"input": 0.00300, "output": 0.01500},
+        "claude-opus-4-6":            {"input": 0.01500, "output": 0.07500},
     }
 }
 
+MODEL_LABELS = {
+    "claude-haiku-4-5-20251001":  "Claude Haiku 💰 (default economico)",
+    "claude-sonnet-4-6": "Claude Sonnet 3.5 🔋 (premium)",
+    "claude-opus-4-6":   "Claude Opus 3 💎 (massima qualità)",
+    "gpt-4o-mini":       "GPT-4o Mini 💰 (default economico)",
+    "gpt-4o":            "GPT-4o 🔋 (premium)",
+    "gpt-4.1-mini":      "GPT-4.1 Mini 💰",
+    "gpt-4.1":           "GPT-4.1 🔋",
+}
+
+# OBJ 1: max_tokens esplicito per modello — evita troncature silenziose
+MODEL_MAX_TOKENS = {
+    "gpt-4o-mini":              4096,
+    "gpt-4o":                   4096,
+    "gpt-4.1-mini":             4096,
+    "gpt-4.1":                  4096,
+    "claude-haiku-4-5-20251001":       4096,
+    "claude-sonnet-4-6":        8192,
+    "claude-opus-4-6":          4096,
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 3: TOKEN ESTIMATION
-# Stima tokens prima della chiamata per mostrare costo atteso.
-# Regola empirica: ~4 caratteri ≈ 1 token (buona approssimazione per italiano)
+# SEZIONE 3: TOKEN UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 def estimate_tokens(text: str) -> int:
-    """Stima token count: ~4 caratteri per token per testo italiano."""
     return max(1, len(text) // 4)
 
 def estimate_cost(input_tokens: int, output_tokens: int, provider: str, model: str) -> float:
-    """Calcola costo stimato in USD dato input/output tokens."""
     try:
         p = PRICING[provider][model]
         return (input_tokens / 1000 * p["input"]) + (output_tokens / 1000 * p["output"])
@@ -122,675 +99,830 @@ def estimate_cost(input_tokens: int, output_tokens: int, provider: str, model: s
         return 0.0
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 4: SYSTEM PROMPT BUILDER
-# Il system prompt è DENSO e imperativo — nessuna prosa, solo regole.
-# Inietta i GEO_CRITERIA dalla costante (mai dal file runtime).
-# Output_format specifica la struttura JSON esatta → parsing affidabile.
+# SEZIONE 4: REPAIR JSON (OBJ 1)
+# Stack-based: traccia parentesi aperte ignorando quelle in stringhe.
+# Chiude nella sequenza inversa corretta → salva output parziali da troncatura.
 # ─────────────────────────────────────────────────────────────────────────────
-def build_system_prompt() -> str:
-    """
-    TOKEN SAVING: Il system prompt usa GEO_CRITERIA dalla costante locale.
-    Nessuna chiamata extra per leggere il file. Lunghezza ~600 token fissi
-    che si ammortizzano su ogni generazione successiva (API stateless).
-    """
-    return f"""Sei un copywriter GEO/SEO esperto. Generi testi web in italiano ottimizzati per visibilità AI.
+def repair_json(text: str) -> str:
+    if not text:
+        return text
 
-FRAMEWORK OBBLIGATORIO — GEO SCORE™:
+    text = re.sub(r"```(?:json)?", "", text).strip()
+    if text.endswith(","):
+        text = text[:-1]
+
+    stack = []
+    in_string = False
+    escape_next = False
+
+    for char in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if char == "\\" and in_string:
+            escape_next = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if stack:
+                stack.pop()
+
+    closers = {"{": "}", "[": "]"}
+    for opener in reversed(stack):
+        text += closers[opener]
+
+    return text
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 5: SYSTEM PROMPT BUILDER (OBJ 3 — Alligator Style)
+# ─────────────────────────────────────────────────────────────────────────────
+def build_system_prompt(stile_esempi: str = "") -> str:
+    alligator_rules = """APPROCCIO ALLIGATOR (OBBLIGATORIO):
+- DIRETTO: Frasi brevi. Soggetto + Verbo + Oggetto. Zero giri di parole.
+- RISULTATI: Ogni affermazione ha una conseguenza misurabile per il cliente.
+- NO TREND VUOTI: Vietato "digital transformation", "ecosistema", "sinergie", "paradigma". Sostituisci con un dato.
+- AUTOREVOLE TECNICO: Terminologia di settore. Il lettore è esperto.
+- LEGGIBILE: Periodi max 20 parole. Sottotitoli ogni 100 parole."""
+
+    style_section = ""
+    if stile_esempi and stile_esempi.strip():
+        style_section = f"""
+ANALISI TONO DI VOCE — ESEMPI REALI DEL BRAND:
+---
+{stile_esempi.strip()}
+---
+ISTRUZIONE STILE: Analizza i testi sopra. Identifica lunghezza media frasi, vocabolario ricorrente, struttura titoli, uso numeri. Replica ESATTAMENTE quel tono. Non interpretare, non migliorare: replica."""
+
+    return f"""Sei il copywriter GEO/SEO senior di Alligator. Generi contenuti web ad alta citabilità AI.
+
+{alligator_rules}
+{style_section}
+
+FRAMEWORK GEO SCORE:
 {GEO_CRITERIA}
 
-REGOLE DI OUTPUT (OBBLIGATORIE, NESSUNA ECCEZIONE):
-- Rispondi ESCLUSIVAMENTE con un oggetto JSON valido. Zero testo fuori dal JSON.
-- NO introduzioni, NO conclusioni, NO commenti, NO "Ecco il testo:", NO markdown.
-- Ogni sezione deve rispettare attivamente le 8 dimensioni GEO Score™.
-- Usa H1/H2/H3 come prefissi testuali: # Titolo H1 / ## Titolo H2 / ### Titolo H3
-- Includi SEMPRE almeno 1 dato numerico citabile per sezione (citabilità AI).
-- Le FAQ devono rispondere a domande reali che un utente cercherebbe su un motore AI.
-- Schema Markup: JSON-LD valido, Organization + FAQPage, pronto per <script type="application/ld+json">.
-- Frasi autonome: ogni affermazione importante deve avere senso FUORI CONTESTO (l'AI estrae chunk).
-- Evita cliché: "leader del settore", "qualità eccellente", "soluzioni innovative" → usa dati concreti.
-- Struttura output JSON ESATTA richiesta (vedi user prompt).
-"""
+REGOLE OUTPUT (ASSOLUTE):
+- Rispondi SOLO con JSON valido. Zero testo fuori dal JSON.
+- NO introduzioni, NO conclusioni, NO commenti, NO markdown fuori JSON.
+- Ogni sezione: minimo 1 dato numerico citabile.
+- Claim autonomi: ogni frase chiave ha senso estratta fuori contesto.
+- Zero cliché: sostituisci "leader/eccellente/innovativo/qualità" con dati."""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 5: USER PROMPT BUILDER (ONE-SHOT)
-# UN solo user prompt genera TUTTO il pacchetto in un'unica chiamata API.
-# Risparmio: ~65% vs chiamate separate (ogni call ha overhead fisso di
-# contesto + system prompt). Il formato JSON garantisce parsing affidabile.
+# SEZIONE 6: PROMPT MODULARI (OBJ 1)
+# Una funzione per sezione → output ~800-1200 token max → no troncature.
 # ─────────────────────────────────────────────────────────────────────────────
-def build_user_prompt(azienda: str, servizi: str, target: str, fatti: str, lingua: str = "italiano") -> str:
-    """
-    ONE-SHOT PROMPT: Genera Home + Servizio + FAQ + Schema in una sola call.
-    Il formato JSON delimitato elimina parsing ambigui e riduce token di output.
-    """
-    return f"""Genera il pacchetto completo GEO-ottimizzato per:
-
-AZIENDA: {azienda}
+def build_ctx(azienda, servizi, target, fatti, local_seo, lingua) -> str:
+    addr = local_seo.get("indirizzo", "")
+    return f"""AZIENDA: {azienda}
 SERVIZI: {servizi}
 TARGET: {target}
-FATTI UNICI/CITABILI: {fatti}
-LINGUA OUTPUT: {lingua}
+FATTI CITABILI: {fatti}
+INDIRIZZO: {addr if addr else "Non specificato"}
+LINGUA: {lingua}"""
 
-Restituisci SOLO questo JSON (nessun testo prima o dopo):
+
+def prompt_home(ctx: str) -> str:
+    return f"""{ctx}
+
+Genera SOLO il blocco "home". Rispondi ESCLUSIVAMENTE con questo JSON:
 {{
   "home": {{
-    "h1": "Titolo H1 homepage (max 60 caratteri, keyword principale inclusa)",
-    "intro": "Paragrafo introduttivo (150-200 parole). Prima frase = risposta diretta alla query principale dell'utente. Includi 1 dato numerico citabile. Nessun cliché.",
+    "h1": "Titolo H1 max 60 char, keyword principale",
+    "intro": "150-200 parole. Prima frase = risposta diretta. 1 dato numerico. Stile Alligator.",
     "sezione_1": {{
-      "h2": "Titolo H2 della prima sezione valore",
-      "body": "Corpo sezione (100-150 parole). Formattazione: usa ### per sottotitoli interni se utile. Inserisci dato numerico o fatto unico dal debrief."
+      "h2": "H2 valore concreto non generico",
+      "body": "100-150 parole. Dato numerico o fatto unico dal debrief."
     }},
     "sezione_2": {{
-      "h2": "Titolo H2 della seconda sezione differenziazione",
-      "body": "Corpo sezione (100-150 parole). Spiega l'unicità del brand con dati concreti, non aggettivi vuoti."
+      "h2": "H2 differenziazione specifica",
+      "body": "100-150 parole. Unicità con dati concreti, zero cliché."
     }},
-    "cta": "Testo call-to-action finale (1 frase, imperativo, specifico)"
-  }},
+    "cta": "1 frase imperativa e specifica"
+  }}
+}}"""
+
+
+def prompt_servizio(ctx: str) -> str:
+    return f"""{ctx}
+
+Genera SOLO il blocco "pagina_servizio". Rispondi ESCLUSIVAMENTE con questo JSON:
+{{
   "pagina_servizio": {{
-    "h1": "Titolo H1 pagina servizio (keyword long-tail inclusa)",
-    "intro": "Paragrafo introduttivo servizio (100-150 parole). Risposta diretta: cosa ottiene il cliente, non cosa fa l'azienda.",
+    "h1": "H1 pagina servizio con keyword long-tail",
+    "intro": "100-150 parole. Cosa ottiene il cliente, non cosa fa l'azienda.",
     "come_funziona": {{
       "h2": "Come funziona [Servizio] — titolo descrittivo",
       "steps": [
-        "Step 1: descrizione concreta (max 2 righe)",
-        "Step 2: descrizione concreta (max 2 righe)",
-        "Step 3: descrizione concreta (max 2 righe)",
-        "Step 4: descrizione concreta (max 2 righe)"
+        "Step 1: azione concreta max 2 righe",
+        "Step 2: azione concreta max 2 righe",
+        "Step 3: azione concreta max 2 righe",
+        "Step 4: azione concreta max 2 righe"
       ]
     }},
     "benefici": {{
-      "h2": "Cosa ottieni: titolo con numero specifico (es. '5 risultati garantiti')",
+      "h2": "Titolo con numero specifico es. 4 risultati che ottieni",
       "lista": [
-        "Beneficio 1 con dato numerico o fatto verificabile",
-        "Beneficio 2 con dato numerico o fatto verificabile",
-        "Beneficio 3 con dato numerico o fatto verificabile",
-        "Beneficio 4 con dato numerico o fatto verificabile"
+        "Beneficio 1 + dato numerico verificabile",
+        "Beneficio 2 + dato numerico verificabile",
+        "Beneficio 3 + dato numerico verificabile",
+        "Beneficio 4 + dato numerico verificabile"
       ]
     }},
-    "cta": "Testo CTA pagina servizio (1 frase, specifica al servizio)"
-  }},
+    "cta": "CTA specifica al servizio, imperativa"
+  }}
+}}"""
+
+
+def prompt_faq(ctx: str) -> str:
+    return f"""{ctx}
+
+Genera SOLO il blocco "faq" con 5 domande. Rispondi ESCLUSIVAMENTE con questo JSON:
+{{
   "faq": [
     {{
-      "domanda": "Domanda 1 — reale query AI (inizia con Come/Cosa/Quanto/Perché/Chi)",
-      "risposta": "Risposta completa autonoma (80-120 parole). Deve avere senso estratta fuori contesto. Include dato concreto."
+      "domanda": "Query reale motore AI — inizia con Come/Cosa/Quanto/Perche/Chi",
+      "risposta": "80-120 parole. Autonoma fuori contesto. Include dato concreto."
     }},
-    {{
-      "domanda": "Domanda 2",
-      "risposta": "Risposta 2"
-    }},
-    {{
-      "domanda": "Domanda 3",
-      "risposta": "Risposta 3"
-    }},
-    {{
-      "domanda": "Domanda 4",
-      "risposta": "Risposta 4"
-    }},
-    {{
-      "domanda": "Domanda 5",
-      "risposta": "Risposta 5"
-    }}
-  ],
+    {{"domanda": "Domanda 2", "risposta": "Risposta 2 80-120 parole"}},
+    {{"domanda": "Domanda 3", "risposta": "Risposta 3 80-120 parole"}},
+    {{"domanda": "Domanda 4", "risposta": "Risposta 4 80-120 parole"}},
+    {{"domanda": "Domanda 5", "risposta": "Risposta 5 80-120 parole"}}
+  ]
+}}"""
+
+
+def prompt_schema(ctx: str, azienda: str, local_seo: dict, faq_data: list) -> str:
+    """OBJ 2: Inietta dati Local SEO nel prompt → modello genera schema base."""
+    indirizzo = local_seo.get("indirizzo", "")
+    url_sito  = local_seo.get("url", "https://www.esempio.it")
+    linkedin  = local_seo.get("linkedin", "")
+    schema_type = "LocalBusiness" if indirizzo.strip() else "Organization"
+
+    orari = local_seo.get("orari", {})
+    orari_str = ""
+    giorni_map = {"Lunedi":"Monday","Martedi":"Tuesday","Mercoledi":"Wednesday",
+                  "Giovedi":"Thursday","Venerdi":"Friday","Sabato":"Saturday","Domenica":"Sunday"}
+    for g, (ap, ch) in orari.items():
+        if ap and ch:
+            g_clean = g.replace("ì","i").replace("è","e").replace("é","e")
+            orari_str += f"{giorni_map.get(g_clean, g)}: {ap}-{ch} | "
+
+    return f"""{ctx}
+SCHEMA TYPE: {schema_type}
+URL: {url_sito}
+LINKEDIN: {linkedin if linkedin else "da compilare"}
+ORARI: {orari_str if orari_str else "non specificati"}
+
+Genera SOLO il blocco "schema_markup". Rispondi ESCLUSIVAMENTE con questo JSON:
+{{
   "schema_markup": {{
     "organization": {{
       "@context": "https://schema.org",
-      "@type": "Organization",
+      "@type": "{schema_type}",
       "name": "{azienda}",
-      "description": "Descrizione brand 160 caratteri max, keyword principale inclusa",
-      "url": "https://www.esempio.it",
-      "sameAs": ["https://www.linkedin.com/company/esempio"],
-      "knowsAbout": ["Topic 1", "Topic 2", "Topic 3"]
-    }},
-    "faq_schema": {{
-      "@context": "https://schema.org",
-      "@type": "FAQPage",
-      "mainEntity": "PLACEHOLDER — verrà popolato con le FAQ generate"
+      "description": "Descrizione 160 char max con keyword principale",
+      "url": "{url_sito}",
+      "sameAs": ["{linkedin if linkedin else 'https://www.linkedin.com/company/esempio'}"],
+      "knowsAbout": ["Topic specifico 1", "Topic specifico 2", "Topic specifico 3"]
     }}
   }}
 }}"""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 6: API CALL HANDLERS
-# Due handler separati (OpenAI / Anthropic) per massima compatibilità.
-# Entrambi usano lo stesso system prompt concentrato e temperature=0.7.
+# SEZIONE 7: API CALL HANDLERS
+# OBJ 1: max_tokens esplicito, prefill Anthropic
 # ─────────────────────────────────────────────────────────────────────────────
-def call_openai(api_key: str, model: str, system: str, user: str, max_tokens: int = 4000) -> tuple[Optional[str], int, int]:
-    """
-    Chiama OpenAI API. Restituisce (risposta, input_tokens, output_tokens).
-    Usa max_tokens=4000 per accomodare tutto il JSON one-shot.
-    """
+def call_openai(api_key: str, model: str, system: str, user: str) -> tuple:
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
+        client  = OpenAI(api_key=api_key)
+        max_tok = MODEL_MAX_TOKENS.get(model, 4000)
+        resp    = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user}
-            ],
-            temperature=0.7,        # Creatività controllata, output non verboso
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"}  # Forza JSON puro → meno token sprecati
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0.7,
+            max_tokens=max_tok,
+            response_format={"type": "json_object"}
         )
-        content = response.choices[0].message.content
-        usage = response.usage
-        return content, usage.prompt_tokens, usage.completion_tokens
+        return resp.choices[0].message.content, resp.usage.prompt_tokens, resp.usage.completion_tokens
     except ImportError:
         return None, 0, 0
     except Exception as e:
         raise e
 
-def call_anthropic(api_key: str, model: str, system: str, user: str, max_tokens: int = 4000) -> tuple[Optional[str], int, int]:
-    """
-    Chiama Anthropic API. Restituisce (risposta, input_tokens, output_tokens).
-    Prefill con "{" per forzare output JSON diretto → risparmio ~10-20 token.
-    """
+
+def call_anthropic(api_key: str, model: str, system: str, user: str) -> tuple:
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
+        client  = anthropic.Anthropic(api_key=api_key)
+        max_tok = MODEL_MAX_TOKENS.get(model, 4000)
+        resp    = client.messages.create(
             model=model,
-            max_tokens=max_tokens,
+            max_tokens=max_tok,
             system=system,
             messages=[
                 {"role": "user",      "content": user},
-                {"role": "assistant", "content": "{"}   # PREFILL TRICK: forza JSON, elimina preamble
+                {"role": "assistant", "content": "{"}  # Prefill: forza JSON, elimina preamble
             ],
             temperature=0.7
         )
-        content = "{" + response.content[0].text  # Reintegra il prefill
-        usage = response.usage
-        return content, usage.input_tokens, usage.output_tokens
+        content = "{" + resp.content[0].text
+        return content, resp.usage.input_tokens, resp.usage.output_tokens
     except ImportError:
         return None, 0, 0
     except Exception as e:
         raise e
 
+
+def call_api(provider, api_key, model, system, user):
+    if provider == "openai":
+        return call_openai(api_key, model, system, user)
+    return call_anthropic(api_key, model, system, user)
+
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 7: JSON PARSER ROBUSTO
-# Gestisce edge cases: markdown code blocks, trailing commas, testo extra.
+# SEZIONE 8: JSON PARSER ROBUSTO (OBJ 1)
+# Cascata: parsing diretto → estrazione blocco → repair_json
 # ─────────────────────────────────────────────────────────────────────────────
 def parse_json_response(raw: str) -> Optional[dict]:
-    """
-    Parser robusto: rimuove markdown, cerca il primo oggetto JSON valido.
-    Usato perché alcuni modelli ignorano le istruzioni "solo JSON".
-    """
     if not raw:
         return None
-    # Rimuovi code fences markdown
-    raw = re.sub(r"```(?:json)?", "", raw).strip()
-    # Cerca il primo { ... } valido
+    cleaned = re.sub(r"```(?:json)?", "", raw).strip()
+    # Tentativo 1: parsing diretto
     try:
-        return json.loads(raw)
+        return json.loads(cleaned)
     except json.JSONDecodeError:
-        # Fallback: trova la prima { e l'ultima }
-        start = raw.find("{")
-        end   = raw.rfind("}") + 1
-        if start != -1 and end > start:
-            try:
-                return json.loads(raw[start:end])
-            except:
-                pass
+        pass
+    # Tentativo 2: estrai primo blocco JSON
+    start = cleaned.find("{")
+    end   = cleaned.rfind("}") + 1
+    if start != -1 and end > start:
+        chunk = cleaned[start:end]
+        try:
+            return json.loads(chunk)
+        except json.JSONDecodeError:
+            pass
+        # Tentativo 3: repair_json su chunk parziale
+        repaired = repair_json(chunk)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
     return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 8: SCHEMA MARKUP BUILDER
-# Costruisce il JSON-LD finale combinando Organization + FAQPage.
-# Pronto per copia/incolla in WordPress (widget HTML o header).
+# SEZIONE 9: SCHEMA MARKUP BUILDER (OBJ 2)
+# Sovrascrive in Python i campi Local SEO — più affidabile che aspettarsi
+# che il modello abbia compilato correttamente indirizzi/coordinate/orari.
 # ─────────────────────────────────────────────────────────────────────────────
-def build_final_schema(data: dict) -> str:
-    """
-    Assembla Schema Markup JSON-LD completo (Organization + FAQPage).
-    Popola FAQPage con le FAQ generate, non con placeholder.
-    """
-    schema = data.get("schema_markup", {})
-    org    = schema.get("organization", {})
-    faqs   = data.get("faq", [])
+def build_final_schema(data: dict, local_seo: dict, azienda: str) -> str:
+    schema_raw = data.get("schema_markup", {})
+    org        = dict(schema_raw.get("organization", {}))
+    faqs       = data.get("faq", [])
 
-    # FAQPage con le domande reali generate
+    indirizzo = local_seo.get("indirizzo", "").strip()
+    gps_lat   = local_seo.get("gps_lat",   "").strip()
+    gps_lon   = local_seo.get("gps_lon",   "").strip()
+    orari     = local_seo.get("orari",     {})
+    url_sito  = local_seo.get("url",       "https://www.esempio.it").strip()
+    linkedin  = local_seo.get("linkedin",  "").strip()
+
+    schema_type    = "LocalBusiness" if indirizzo else "Organization"
+    org["@type"]   = schema_type
+    org["@context"] = "https://schema.org"
+    org["name"]    = azienda
+    if url_sito:    org["url"]     = url_sito
+    if linkedin:    org["sameAs"]  = [linkedin]
+
+    # Indirizzo strutturato (OBJ 2)
+    if indirizzo:
+        parts  = [p.strip() for p in indirizzo.split(",")]
+        org["address"] = {
+            "@type":           "PostalAddress",
+            "streetAddress":   parts[0] if len(parts) > 0 else "",
+            "addressLocality": parts[1] if len(parts) > 1 else "",
+            "postalCode":      parts[2] if len(parts) > 2 else "",
+            "addressRegion":   parts[3] if len(parts) > 3 else "",
+            "addressCountry":  "IT"
+        }
+
+    # Coordinate GPS (OBJ 2)
+    if gps_lat and gps_lon:
+        try:
+            org["geo"] = {
+                "@type":     "GeoCoordinates",
+                "latitude":  float(gps_lat),
+                "longitude": float(gps_lon)
+            }
+        except ValueError:
+            pass
+
+    # openingHoursSpecification dalla griglia (OBJ 2)
+    giorni_map = {
+        "Lunedì": "Monday", "Martedì": "Tuesday", "Mercoledì": "Wednesday",
+        "Giovedì": "Thursday", "Venerdì": "Friday", "Sabato": "Saturday", "Domenica": "Sunday"
+    }
+    oh = []
+    for g_it, (apertura, chiusura) in orari.items():
+        if apertura and chiusura:
+            oh.append({
+                "@type":     "OpeningHoursSpecification",
+                "dayOfWeek": f"https://schema.org/{giorni_map.get(g_it, g_it)}",
+                "opens":     apertura,
+                "closes":    chiusura
+            })
+    if oh:
+        org["openingHoursSpecification"] = oh
+
+    # FAQPage con FAQ reali
     faq_schema = {
         "@context": "https://schema.org",
         "@type":    "FAQPage",
         "mainEntity": [
             {
                 "@type": "Question",
-                "name":  faq["domanda"],
-                "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text":  faq["risposta"]
-                }
+                "name":  f.get("domanda", ""),
+                "acceptedAnswer": {"@type": "Answer", "text": f.get("risposta", "")}
             }
-            for faq in faqs
+            for f in faqs
         ]
     }
 
-    combined = {
-        "@context": "https://schema.org",
-        "@graph": [org, faq_schema]
-    }
-    return json.dumps(combined, ensure_ascii=False, indent=2)
+    return json.dumps({"@context": "https://schema.org", "@graph": [org, faq_schema]},
+                      ensure_ascii=False, indent=2)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 9: UI HELPERS
-# Funzioni per rendering pulito dei blocchi di contenuto.
+# SEZIONE 10: UI HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-def copy_button(label: str, text: str, key: str):
-    """Mostra testo in text_area con key univoca per facile selezione/copia."""
+def copy_box(label, text, key):
     st.text_area(label, value=text, height=200, key=key,
-                 help="Seleziona tutto (Ctrl+A) e copia (Ctrl+C)")
+                 help="Ctrl+A per selezionare tutto → Ctrl+C per copiare")
 
-def render_home(home: dict):
-    st.markdown(f"### `# {home.get('h1', '')}`")
-    st.markdown(f"**Intro:** {home.get('intro', '')}")
-    s1 = home.get("sezione_1", {})
-    if s1:
-        st.markdown(f"**## {s1.get('h2', '')}**")
-        st.markdown(s1.get("body", ""))
-    s2 = home.get("sezione_2", {})
-    if s2:
-        st.markdown(f"**## {s2.get('h2', '')}**")
-        st.markdown(s2.get("body", ""))
-    st.markdown(f"**CTA:** _{home.get('cta', '')}_")
+def render_home(home):
+    st.markdown(f"**H1:** `{home.get('h1','')}`")
+    st.markdown(f"**Intro:**\n\n{home.get('intro','')}")
+    for k, lbl in [("sezione_1","Sezione 1"),("sezione_2","Sezione 2")]:
+        s = home.get(k,{})
+        if s:
+            st.markdown(f"**H2 {lbl}:** `{s.get('h2','')}`")
+            st.markdown(s.get("body",""))
+    st.markdown(f"**CTA:** _{home.get('cta','')}_")
 
-def render_service(page: dict):
-    st.markdown(f"### `# {page.get('h1', '')}`")
-    st.markdown(f"**Intro:** {page.get('intro', '')}")
-    cf = page.get("come_funziona", {})
+def render_service(page):
+    st.markdown(f"**H1:** `{page.get('h1','')}`")
+    st.markdown(f"**Intro:**\n\n{page.get('intro','')}")
+    cf = page.get("come_funziona",{})
     if cf:
-        st.markdown(f"**## {cf.get('h2', '')}**")
-        for step in cf.get("steps", []):
+        st.markdown(f"**H2:** `{cf.get('h2','')}`")
+        for step in cf.get("steps",[]):
             st.markdown(f"- {step}")
-    ben = page.get("benefici", {})
+    ben = page.get("benefici",{})
     if ben:
-        st.markdown(f"**## {ben.get('h2', '')}**")
-        for b in ben.get("lista", []):
+        st.markdown(f"**H2:** `{ben.get('h2','')}`")
+        for b in ben.get("lista",[]):
             st.markdown(f"✅ {b}")
-    st.markdown(f"**CTA:** _{page.get('cta', '')}_")
+    st.markdown(f"**CTA:** _{page.get('cta','')}_")
 
-def render_faq(faqs: list):
+def render_faq(faqs):
     for i, faq in enumerate(faqs, 1):
         with st.expander(f"❓ {faq.get('domanda', f'FAQ {i}')}"):
-            st.markdown(faq.get("risposta", ""))
+            st.markdown(faq.get("risposta",""))
+
+def home_to_md(h):
+    t = f"# {h.get('h1','')}\n\n{h.get('intro','')}\n\n"
+    for k in ["sezione_1","sezione_2"]:
+        s = h.get(k,{})
+        if s: t += f"## {s.get('h2','')}\n\n{s.get('body','')}\n\n"
+    t += h.get("cta","")
+    return t
+
+def service_to_md(p):
+    t = f"# {p.get('h1','')}\n\n{p.get('intro','')}\n\n"
+    cf = p.get("come_funziona",{})
+    if cf:
+        t += f"## {cf.get('h2','')}\n\n"
+        for s in cf.get("steps",[]): t += f"- {s}\n"
+        t += "\n"
+    ben = p.get("benefici",{})
+    if ben:
+        t += f"## {ben.get('h2','')}\n\n"
+        for b in ben.get("lista",[]): t += f"✅ {b}\n"
+        t += "\n"
+    t += p.get("cta","")
+    return t
+
+def faq_to_md(faqs):
+    t = "## Domande Frequenti\n\n"
+    for f in faqs:
+        t += f"### {f.get('domanda','')}\n\n{f.get('risposta','')}\n\n"
+    return t
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 10: MAIN APP
+# SEZIONE 11: MAIN APP
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
-        page_title="GEO Score™ Content Generator",
-        page_icon="🤖",
+        page_title="GEO Score™ v2 — Alligator",
+        page_icon="🐊",
         layout="wide",
         initial_sidebar_state="expanded"
     )
 
-    # ── CSS CUSTOM ──────────────────────────────────────────────────────────
     st.markdown("""
     <style>
-    .geo-header { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-                  color: white; padding: 1.5rem 2rem; border-radius: 12px; margin-bottom: 1.5rem; }
-    .geo-header h1 { margin: 0; font-size: 2rem; }
-    .geo-header p  { margin: 0.3rem 0 0; opacity: 0.8; font-size: 0.95rem; }
-    .cost-box { background: #f0f9ff; border-left: 4px solid #0ea5e9;
-                padding: 0.8rem 1rem; border-radius: 6px; margin: 0.5rem 0; }
-    .stTabs [data-baseweb="tab"] { font-size: 1rem; padding: 0.5rem 1.2rem; }
+    .geo-header {
+        background: linear-gradient(135deg, #0d1117 0%, #1a2332 50%, #0f3460 100%);
+        color: white; padding: 1.4rem 2rem; border-radius: 10px; margin-bottom: 1.2rem;
+    }
+    .geo-header h1 { margin: 0; font-size: 1.8rem; }
+    .geo-header p  { margin: 0.3rem 0 0; opacity: 0.75; font-size: 0.9rem; }
+    .cost-box {
+        background: #f0f9ff; border-left: 4px solid #0ea5e9;
+        padding: 0.7rem 1rem; border-radius: 6px; margin: 0.4rem 0; font-size: 0.88rem;
+    }
+    .module-card {
+        border: 1px solid #e2e8f0; border-radius: 8px;
+        padding: 0.75rem 1rem; margin: 0.3rem 0; background: #fafafa;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── HEADER ──────────────────────────────────────────────────────────────
     st.markdown("""
     <div class="geo-header">
-        <h1>🤖 GEO Score™ Content Generator</h1>
-        <p>Genera contenuti ottimizzati per visibilità AI · Framework by Nico Fioretti · Cost-optimized build</p>
+        <h1>🐊 GEO Score™ Content Generator v2 — Alligator Edition</h1>
+        <p>Generazione Modulare · Local SEO · Style Replication · Framework GEO Score™ by Nico Fioretti</p>
     </div>
     """, unsafe_allow_html=True)
 
-    # ────────────────────────────────────────────────────────────────────────
-    # SIDEBAR — Configurazione API & Stima Costi
-    # ────────────────────────────────────────────────────────────────────────
+    # ── SIDEBAR ──────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("⚙️ Configurazione API")
-        st.caption("Scegli provider, modello e inserisci la tua API key.")
 
-        provider = st.selectbox(
-            "Provider AI",
-            ["openai", "anthropic"],
-            format_func=lambda x: "🟢 OpenAI" if x == "openai" else "🟠 Anthropic"
-        )
+        provider = st.selectbox("Provider AI", ["anthropic", "openai"],
+                                format_func=lambda x: "🟠 Anthropic" if x=="anthropic" else "🟢 OpenAI")
 
-        # Modelli per provider — default ai più economici per risparmio massimo
         if provider == "openai":
-            model_options = list(PRICING["openai"].keys())
-            default_model = "gpt-4o-mini"
+            opts, dflt = list(PRICING["openai"].keys()), "gpt-4o-mini"
         else:
-            model_options = list(PRICING["anthropic"].keys())
-            default_model = "claude-haiku-4-5-20251001"
+            opts, dflt = list(PRICING["anthropic"].keys()), "claude-haiku-4-5-20251001"
 
-        default_idx = model_options.index(default_model) if default_model in model_options else 0
-        model = st.selectbox("Modello", model_options, index=default_idx)
+        model = st.selectbox("Modello", opts,
+                             index=opts.index(dflt) if dflt in opts else 0,
+                             format_func=lambda m: MODEL_LABELS.get(m, m))
 
-        # Etichette user-friendly per i modelli
-        model_labels = {
-            "gpt-4o-mini":              "gpt-4o-mini 💰 (consigliato)",
-            "gpt-4o":                   "gpt-4o 🔋",
-            "gpt-4.1-mini":             "gpt-4.1-mini 💰",
-            "gpt-4.1":                  "gpt-4.1 🔋",
-            "claude-haiku-4-5-20251001":       "Claude Haiku 💰 (consigliato)",
-            "claude-sonnet-4-6":        "Claude Sonnet 3.5 🔋",
-            "claude-opus-4-6":          "Claude Opus 3 💎",
-        }
-        st.caption(f"Selezionato: **{model_labels.get(model, model)}**")
-
-        api_key = st.text_input(
-            "🔑 API Key",
-            type="password",
-            placeholder="sk-... oppure sk-ant-...",
-            help="La key non viene salvata né loggata."
-        )
+        api_key = st.text_input("🔑 API Key", type="password",
+                                placeholder="sk-... oppure sk-ant-...")
 
         st.divider()
-
-        # ── STIMA COSTI IN TEMPO REALE ──────────────────────────────────
-        # TOKEN SAVING: La stima avviene PRIMA della chiamata, così l'utente
-        # può scegliere il modello più economico consapevolmente.
         st.subheader("💰 Stima Costi")
-        st.caption("Calcolata sul prompt sistema + input stimato output")
-
-        system_tokens  = estimate_tokens(build_system_prompt())
-        base_user_est  = 500  # tokens medi per un user prompt compilato
-        output_est     = 1800 # stima output JSON completo (~7200 caratteri)
-        total_in       = system_tokens + base_user_est
-
-        cost_est = estimate_cost(total_in, output_est, provider, model)
-
+        sys_tok = estimate_tokens(build_system_prompt())
+        in_est  = sys_tok + 300
+        out_est = 1200
+        cpp     = estimate_cost(in_est, out_est, provider, model)
         st.markdown(f"""
         <div class="cost-box">
-            <b>Token stimati:</b> {total_in + output_est:,}<br>
-            &nbsp;&nbsp;• Input: ~{total_in:,} token<br>
-            &nbsp;&nbsp;• Output: ~{output_est:,} token<br>
-            <b>Costo stimato: ${cost_est:.5f}</b>
+            <b>Per sezione (modulare):</b><br>
+            Input ~{in_est:,} tok · Output ~{out_est:,} tok<br>
+            <b>Costo/sezione: ${cpp:.5f}</b><br>
+            4 sezioni totali: <b>~${cpp*4:.5f}</b>
         </div>
         """, unsafe_allow_html=True)
 
-        st.caption("⚠️ Stima. Il costo reale dipende dall'input effettivo.")
-
         st.divider()
-        st.markdown("**📖 GEO Score™ Framework**")
-        with st.expander("Dimensioni caricate (da Excel)"):
-            st.markdown("""
-            Le 8 dimensioni sono **hardcoded** come costante Python,
-            estratte dal file Excel `GEO_Score_Nico_Fioretti.xlsx`.
-            Nessun token sprecato a rileggerle ogni chiamata.
+        with st.expander("📖 GEO 8 Dimensioni (hardcoded)"):
+            st.markdown("1.⚙️Tecnica · 2.📝Contenuto · 3.🏷️Identità · 4.🔍Leggibilità\n5.🌐Autorità · 6.🏅Credibilità · 7.💎Unicità · 8.🔄Freschezza\n\n*0 token overhead — costante Python*")
 
-            1. ⚙️ Tecnica
-            2. 📝 Contenuto
-            3. 🏷️ Identità
-            4. 🔍 Leggibilità
-            5. 🌐 Autorità
-            6. 🏅 Credibilità
-            7. 💎 Unicità
-            8. 🔄 Freschezza
-            """)
-
-    # ────────────────────────────────────────────────────────────────────────
-    # MAIN CONTENT — 3 TAB
-    # ────────────────────────────────────────────────────────────────────────
+    # ── TABS ──────────────────────────────────────────────────────────────────
     tab1, tab2, tab3 = st.tabs(["📋 Debrief", "🛠️ Generatore", "📄 Risultati"])
 
-    # ── TAB 1: DEBRIEF ──────────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════
+    # TAB 1: DEBRIEF
+    # ═══════════════════════════════════════════════════════════════════════
     with tab1:
         st.subheader("📋 Debrief Azienda")
-        st.markdown("Compila questi campi. Più dettagli = migliore citabilità AI nei testi generati.")
 
-        col1, col2 = st.columns(2)
+        st.markdown("#### 🏢 Identità Brand")
+        c1, c2 = st.columns(2)
+        with c1:
+            azienda = st.text_input("Nome Azienda *", key="azienda",
+                                    placeholder="es. Alligator Digital")
+            servizi = st.text_area("Servizi Principali *", key="servizi", height=100,
+                                   placeholder="es. GEO Optimization, Content Strategy, SEO Tecnico")
+        with c2:
+            target  = st.text_area("Target / Clienti Ideali *", key="target", height=100,
+                                   placeholder="es. PMI italiane, Marketing Manager, e-commerce B2B")
+            lingua  = st.selectbox("Lingua Output", ["italiano","inglese","francese","spagnolo"],
+                                   key="lingua")
 
-        with col1:
-            azienda = st.text_input(
-                "🏢 Nome Azienda *",
-                placeholder="es. Studio Legale Bianchi & Partners",
-                key="azienda"
-            )
-            servizi = st.text_area(
-                "🛠️ Servizi Principali *",
-                placeholder="es. Consulenza giuslavoristica, contrattualistica, contenzioso lavoro",
-                height=120,
-                key="servizi"
-            )
+        fatti = st.text_area("💡 Fatti Unici & Citabili *", key="fatti", height=130,
+                              placeholder='"94% tasso citazione AI dopo 90gg" · "Unici in Italia con GEO Score™" · "200+ brand ottimizzati"')
 
-        with col2:
-            target = st.text_area(
-                "🎯 Target / Clienti Ideali *",
-                placeholder="es. PMI italiane 10-50 dipendenti, HR Manager, imprenditori nel manifatturiero",
-                height=120,
-                key="target"
-            )
-            lingua = st.selectbox(
-                "🌍 Lingua Output",
-                ["italiano", "inglese", "francese", "spagnolo", "tedesco"],
-                key="lingua"
-            )
+        st.divider()
 
-        fatti = st.text_area(
-            "💡 Fatti Unici & Citabili (il carburante della citabilità AI)",
-            placeholder="""Esempi di fatti ad alto impatto:
-• "Assistiamo 200+ aziende ogni anno con tasso successo contenziosi del 94%"
-• "Unici in Italia certificati ISO 9001 per la consulenza HR"  
-• "Framework proprietario 'Contratto Zero-Risk' applicato in 15 settori"
-• "Fondatori con 20+ anni esperienza, ex-docenti Università Bocconi"
-• "Costi trasparenti: preventivo fisso in 24h, no sorprese in fattura" """,
-            height=200,
-            key="fatti"
+        # OBJ 3: STYLE BRAND ────────────────────────────────────────────
+        st.markdown("#### 🐊 Tono di Voce — Esempi Reali di Copy")
+        st.caption("Il modello analizza questi testi e replica esattamente il tono nei contenuti generati.")
+        stile_esempi = st.text_area(
+            "Esempi di Stile/Copy (opzionale — fortemente consigliato)",
+            key="stile_esempi", height=150,
+            placeholder='"Non vendiamo visibilità. Costruiamo autorità che dura."\n"Il tuo brand esiste per i motori AI? Scoprilo in 48h con il GEO Audit."\n"Meno traffico inutile. Più richieste qualificate. Dati alla mano."'
         )
 
-        if azienda and servizi and target and fatti:
-            # Anteprima costo con dati reali
-            user_prompt_preview = build_user_prompt(azienda, servizi, target, fatti, lingua)
-            real_input_tokens   = estimate_tokens(build_system_prompt() + user_prompt_preview)
-            real_cost           = estimate_cost(real_input_tokens, output_est, provider, model)
+        st.divider()
 
-            st.success(f"✅ Debrief completo! Token input reali stimati: **{real_input_tokens:,}** | Costo stimato: **${real_cost:.5f}**")
+        # OBJ 2: LOCAL SEO DATA ─────────────────────────────────────────
+        st.markdown("#### 📍 Dati Local SEO (Schema Markup)")
+        st.caption("Compilati automaticamente in JSON-LD LocalBusiness se l'indirizzo è presente.")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            via_civico = st.text_input("Via e Numero Civico", key="via",
+                                       placeholder="es. Via Roma 42")
+            cap        = st.text_input("CAP",      key="cap",  placeholder="20121")
+            citta      = st.text_input("Città",    key="citta",placeholder="Milano")
+            provincia  = st.text_input("Provincia",key="prov", placeholder="MI")
+        with col_b:
+            url_sito = st.text_input("URL Sito Web",         key="url_sito",
+                                      placeholder="https://www.alligator.it")
+            linkedin = st.text_input("URL LinkedIn Company", key="linkedin",
+                                      placeholder="https://www.linkedin.com/company/alligator")
+            gps_lat  = st.text_input("Latitudine GPS (opz.)",key="gps_lat",
+                                      placeholder="45.4654219")
+            gps_lon  = st.text_input("Longitudine GPS (opz.)",key="gps_lon",
+                                      placeholder="9.1859243")
+
+        # GRIGLIA ORARI ─────────────────────────────────────────────────
+        st.markdown("**🕐 Orari di Apertura** *(lascia vuoto = chiuso)*")
+        giorni = ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+        orari_dict = {}
+
+        h_cols = st.columns([2,2,2])
+        h_cols[0].markdown("**Giorno**")
+        h_cols[1].markdown("**Apertura**")
+        h_cols[2].markdown("**Chiusura**")
+
+        for giorno in giorni:
+            row = st.columns([2,2,2])
+            row[0].markdown(f"*{giorno}*")
+            ap = row[1].text_input("", key=f"ap_{giorno}", placeholder="09:00",
+                                    label_visibility="collapsed")
+            ch = row[2].text_input("", key=f"ch_{giorno}", placeholder="18:00",
+                                    label_visibility="collapsed")
+            orari_dict[giorno] = (ap, ch)
+
+        # Componi indirizzo e salva
+        indirizzo_completo = ", ".join(filter(None, [
+            st.session_state.get("via",""),
+            st.session_state.get("citta",""),
+            st.session_state.get("cap",""),
+            st.session_state.get("prov","")
+        ]))
+
+        local_seo = {
+            "indirizzo": indirizzo_completo,
+            "gps_lat":   st.session_state.get("gps_lat",""),
+            "gps_lon":   st.session_state.get("gps_lon",""),
+            "orari":     orari_dict,
+            "url":       st.session_state.get("url_sito",""),
+            "linkedin":  st.session_state.get("linkedin",""),
+        }
+        st.session_state["local_seo"] = local_seo
+
+        fields_ok = all([
+            st.session_state.get("azienda"),
+            st.session_state.get("servizi"),
+            st.session_state.get("target"),
+            st.session_state.get("fatti"),
+        ])
+        if fields_ok:
+            stype = "LocalBusiness 📍" if indirizzo_completo.strip() else "Organization 🌐"
+            st.success(f"✅ Debrief completo · Schema: **{stype}**")
         else:
-            st.info("💡 Compila tutti i campi obbligatori (*) per procedere al Generatore.")
+            st.info("💡 Compila i campi obbligatori (*) per sbloccare il Generatore.")
 
-    # ── TAB 2: GENERATORE ───────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════
+    # TAB 2: GENERATORE MODULARE
+    # ═══════════════════════════════════════════════════════════════════════
     with tab2:
-        st.subheader("🛠️ Generatore One-Shot GEO")
+        st.subheader("🛠️ Generatore Modulare")
 
-        # Recupera valori dal session state / tab 1
-        _azienda = st.session_state.get("azienda", "")
-        _servizi = st.session_state.get("servizi", "")
-        _target  = st.session_state.get("target",  "")
-        _fatti   = st.session_state.get("fatti",   "")
-        _lingua  = st.session_state.get("lingua",  "italiano")
+        _az   = st.session_state.get("azienda","")
+        _sv   = st.session_state.get("servizi","")
+        _tg   = st.session_state.get("target","")
+        _ft   = st.session_state.get("fatti","")
+        _ln   = st.session_state.get("lingua","italiano")
+        _st   = st.session_state.get("stile_esempi","")
+        _loc  = st.session_state.get("local_seo",{})
 
-        ready = bool(_azienda and _servizi and _target and _fatti and api_key)
+        ready = bool(_az and _sv and _tg and _ft and api_key)
 
         if not ready:
-            missing = []
-            if not _azienda: missing.append("Nome Azienda")
-            if not _servizi: missing.append("Servizi")
-            if not _target:  missing.append("Target")
-            if not _fatti:   missing.append("Fatti Unici")
-            if not api_key:  missing.append("API Key (sidebar)")
-            st.warning(f"⚠️ Mancano: **{', '.join(missing)}**. Torna al tab Debrief.")
+            missing = [x for x,v in [
+                ("Nome Azienda",_az),("Servizi",_sv),("Target",_tg),
+                ("Fatti",_ft),("API Key (sidebar)",api_key)
+            ] if not v]
+            st.warning(f"⚠️ Mancano: **{', '.join(missing)}**")
 
-        st.markdown("""
-        **Cosa verrà generato in una sola chiamata API:**
+        st.markdown("#### Seleziona le sezioni da generare")
+        st.caption("1 sezione = 1 chiamata API (~1200 token output) → nessun troncamento JSON.")
 
-        | Sezione | Descrizione |
-        |---------|-------------|
-        | 🏠 Homepage | H1 + intro citabile + 2 sezioni value + CTA |
-        | 📄 Pagina Servizio | H1 + intro + come funziona + benefici + CTA |
-        | ❓ FAQ (5 domande) | Domande reali che AI citerebbe, risposte autonome |
-        | 🔗 Schema Markup | JSON-LD Organization + FAQPage WordPress-ready |
-        """)
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        with mc1:
+            gen_home    = st.checkbox("🏠 Homepage",        value=True, key="gen_home")
+            st.caption("H1, intro, 2 sezioni, CTA")
+        with mc2:
+            gen_service = st.checkbox("📄 Pagina Servizio", value=True, key="gen_service")
+            st.caption("H1, come funziona, benefici, CTA")
+        with mc3:
+            gen_faq     = st.checkbox("❓ FAQ (5 domande)",  value=True, key="gen_faq")
+            st.caption("Query AI reali, risposte autonome")
+        with mc4:
+            gen_schema  = st.checkbox("🔗 Schema Markup",   value=True, key="gen_schema")
+            st.caption("JSON-LD LocalBusiness/Org + FAQ")
 
-        col_btn, col_info = st.columns([1, 2])
+        n_sel = sum([gen_home, gen_service, gen_faq, gen_schema])
 
-        with col_btn:
-            generate_btn = st.button(
-                "🚀 Genera Contenuti GEO",
-                disabled=not ready,
-                type="primary",
-                use_container_width=True
-            )
+        if n_sel == 0:
+            st.warning("Seleziona almeno una sezione.")
 
-        with col_info:
-            if ready:
-                user_p  = build_user_prompt(_azienda, _servizi, _target, _fatti, _lingua)
-                sys_p   = build_system_prompt()
-                in_tok  = estimate_tokens(sys_p + user_p)
-                cost_pr = estimate_cost(in_tok, output_est, provider, model)
-                st.info(f"📊 Stima pre-generazione: **{in_tok + output_est:,} token** | **${cost_pr:.5f}**")
+        st.divider()
 
-        if generate_btn and ready:
-            # ── CHIAMATA API ─────────────────────────────────────────────
-            system_p = build_system_prompt()
-            user_p   = build_user_prompt(_azienda, _servizi, _target, _fatti, _lingua)
+        if ready and n_sel > 0:
+            sp_preview = build_system_prompt(_st)
+            in_est_r   = estimate_tokens(sp_preview) + 300
+            tot_est    = estimate_cost(in_est_r, 1200, provider, model) * n_sel
+            st.info(f"📊 **{n_sel} chiamate pianificate** · Costo totale stimato: **${tot_est:.5f}**")
 
-            with st.spinner("🧠 Generazione in corso (chiamata API singola)..."):
+        gen_btn = st.button(
+            f"🚀 Genera {n_sel} sezione{'i' if n_sel!=1 else ''}",
+            disabled=(not ready or n_sel==0),
+            type="primary"
+        )
+
+        if gen_btn and ready and n_sel > 0:
+            sys_p  = build_system_prompt(_st)
+            ctx    = build_ctx(_az, _sv, _tg, _ft, _loc, _ln)
+
+            total_in  = 0
+            total_out = 0
+            generated = dict(st.session_state.get("generated", {}))
+            call_log  = []
+
+            sections = []
+            if gen_home:    sections.append("home")
+            if gen_service: sections.append("servizio")
+            if gen_faq:     sections.append("faq")
+            if gen_schema:  sections.append("schema")
+
+            progress = st.progress(0, text="Avvio generazione modulare...")
+
+            for i, section in enumerate(sections):
+                progress.progress(int(i/len(sections)*100), text=f"⏳ Generando: **{section}**...")
+
                 try:
-                    if provider == "openai":
-                        raw, in_t, out_t = call_openai(api_key, model, system_p, user_p)
+                    if section == "home":
+                        user_p = prompt_home(ctx)
+                    elif section == "servizio":
+                        user_p = prompt_servizio(ctx)
+                    elif section == "faq":
+                        user_p = prompt_faq(ctx)
                     else:
-                        raw, in_t, out_t = call_anthropic(api_key, model, system_p, user_p)
+                        faq_data = generated.get("faq", [])
+                        user_p   = prompt_schema(ctx, _az, _loc, faq_data)
+
+                    raw, in_t, out_t = call_api(provider, api_key, model, sys_p, user_p)
 
                     if raw is None:
-                        st.error("❌ Libreria non installata. Esegui: pip install openai anthropic")
-                        st.stop()
+                        call_log.append((section, False, "❌ Libreria non installata: pip install openai anthropic"))
+                        continue
 
                     parsed = parse_json_response(raw)
 
                     if parsed:
-                        # Salva in session state per tab Risultati
-                        st.session_state["generated"] = parsed
-                        st.session_state["raw_json"]  = raw
-                        st.session_state["in_tokens"]  = in_t
-                        st.session_state["out_tokens"] = out_t
-
-                        real_cost = estimate_cost(in_t, out_t, provider, model)
-                        st.session_state["real_cost"] = real_cost
-
-                        st.success(f"✅ Generazione completata! Token reali: **{in_t + out_t:,}** | Costo reale: **${real_cost:.5f}**")
-                        st.balloons()
-                        st.info("👉 Vai al tab **📄 Risultati** per copiare i contenuti.")
+                        generated.update(parsed)
+                        total_in  += in_t
+                        total_out += out_t
+                        cst = estimate_cost(in_t, out_t, provider, model)
+                        call_log.append((section, True, f"{in_t+out_t:,} token · ${cst:.5f}"))
                     else:
-                        st.error("❌ Parsing JSON fallito. Risposta raw mostrata sotto:")
-                        st.code(raw, language="text")
+                        call_log.append((section, False, f"Parsing fallito · Anteprima: {raw[:80] if raw else 'vuoto'}"))
 
                 except Exception as e:
-                    st.error(f"❌ Errore API: {str(e)}")
-                    if "api_key" in str(e).lower() or "auth" in str(e).lower():
-                        st.error("🔑 Controlla la API key nella sidebar.")
+                    err_msg = str(e)
+                    call_log.append((section, False, err_msg[:120]))
+                    if "api_key" in err_msg.lower() or "auth" in err_msg.lower():
+                        st.error("🔑 API Key non valida — controlla nella sidebar.")
+                        break
 
-    # ── TAB 3: RISULTATI ────────────────────────────────────────────────────
+            progress.progress(100, text="✅ Generazione completata!")
+
+            st.session_state["generated"]  = generated
+            st.session_state["in_tokens"]  = total_in
+            st.session_state["out_tokens"] = total_out
+            real_tot = estimate_cost(total_in, total_out, provider, model)
+            st.session_state["real_cost"]  = real_tot
+
+            st.markdown("#### 📊 Report per Sezione")
+            for sec, ok, info in call_log:
+                icon = "✅" if ok else "❌"
+                st.markdown(f"{icon} **{sec}** — {info}")
+
+            if any(ok for _,ok,_ in call_log):
+                st.success(f"Token totali: **{total_in+total_out:,}** · Costo reale: **${real_tot:.5f}**")
+                st.info("👉 Vai al tab **📄 Risultati**")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TAB 3: RISULTATI
+    # ═══════════════════════════════════════════════════════════════════════
     with tab3:
-        st.subheader("📄 Risultati — Pronto per WordPress")
+        st.subheader("📄 Risultati — Pronto per WordPress / Elementor")
 
-        if "generated" not in st.session_state:
-            st.info("🔄 Nessun contenuto ancora generato. Vai al tab **🛠️ Generatore**.")
+        if not st.session_state.get("generated"):
+            st.info("🔄 Vai al tab **🛠️ Generatore** per creare i contenuti.")
             st.stop()
 
-        data     = st.session_state["generated"]
-        in_t     = st.session_state.get("in_tokens", 0)
-        out_t    = st.session_state.get("out_tokens", 0)
-        cost_r   = st.session_state.get("real_cost", 0.0)
+        data   = st.session_state["generated"]
+        in_t   = st.session_state.get("in_tokens",  0)
+        out_t  = st.session_state.get("out_tokens", 0)
+        cost_r = st.session_state.get("real_cost",  0.0)
+        _loc   = st.session_state.get("local_seo",  {})
+        _az    = st.session_state.get("azienda",    "Brand")
 
-        # ── METRICHE REALI ───────────────────────────────────────────────
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Token Input",  f"{in_t:,}")
         m2.metric("Token Output", f"{out_t:,}")
-        m3.metric("Token Totali", f"{in_t + out_t:,}")
+        m3.metric("Totale Token", f"{in_t+out_t:,}")
         m4.metric("Costo Reale",  f"${cost_r:.5f}")
 
         st.divider()
 
-        # ── RISULTATI PER SEZIONE ────────────────────────────────────────
-        res1, res2, res3, res4 = st.tabs(["🏠 Homepage", "📄 Servizio", "❓ FAQ", "🔗 Schema"])
+        # Costruisci tab solo per sezioni disponibili
+        avail = []
+        if data.get("home"):            avail.append(("🏠 Homepage","home"))
+        if data.get("pagina_servizio"): avail.append(("📄 Servizio","servizio"))
+        if data.get("faq"):             avail.append(("❓ FAQ","faq"))
+        if data.get("schema_markup") or data.get("faq"): avail.append(("🔗 Schema","schema"))
 
-        # HOME
-        with res1:
-            home = data.get("home", {})
-            if home:
-                render_home(home)
-                st.divider()
-                # Testo formattato per WordPress/Elementor
-                home_text = f"# {home.get('h1','')}\n\n{home.get('intro','')}\n\n"
-                s1 = home.get("sezione_1", {})
-                if s1:
-                    home_text += f"## {s1.get('h2','')}\n\n{s1.get('body','')}\n\n"
-                s2 = home.get("sezione_2", {})
-                if s2:
-                    home_text += f"## {s2.get('h2','')}\n\n{s2.get('body','')}\n\n"
-                home_text += home.get("cta", "")
-                copy_button("📋 Copia testo Homepage (Markdown/Gutenberg)", home_text, "copy_home")
+        if not avail:
+            st.warning("Nessuna sezione trovata. Ritorna al Generatore.")
+            st.stop()
 
-        # SERVIZIO
-        with res2:
-            page = data.get("pagina_servizio", {})
-            if page:
-                render_service(page)
-                st.divider()
-                page_text = f"# {page.get('h1','')}\n\n{page.get('intro','')}\n\n"
-                cf = page.get("come_funziona", {})
-                if cf:
-                    page_text += f"## {cf.get('h2','')}\n\n"
-                    for step in cf.get("steps", []):
-                        page_text += f"- {step}\n"
-                    page_text += "\n"
-                ben = page.get("benefici", {})
-                if ben:
-                    page_text += f"## {ben.get('h2','')}\n\n"
-                    for b in ben.get("lista", []):
-                        page_text += f"✅ {b}\n"
-                    page_text += "\n"
-                page_text += page.get("cta", "")
-                copy_button("📋 Copia testo Pagina Servizio (Markdown/Gutenberg)", page_text, "copy_service")
+        rtabs = st.tabs([a[0] for a in avail])
 
-        # FAQ
-        with res3:
-            faqs = data.get("faq", [])
-            if faqs:
-                render_faq(faqs)
-                st.divider()
-                faq_text = "## Domande Frequenti\n\n"
-                for faq in faqs:
-                    faq_text += f"### {faq.get('domanda','')}\n\n{faq.get('risposta','')}\n\n"
-                copy_button("📋 Copia FAQ (Markdown/Gutenberg)", faq_text, "copy_faq")
+        for rtab, (lbl, key) in zip(rtabs, avail):
+            with rtab:
+                if key == "home":
+                    home = data.get("home",{})
+                    render_home(home)
+                    st.divider()
+                    copy_box("📋 Copia Homepage (Markdown/Gutenberg)", home_to_md(home), "cp_home")
 
-        # SCHEMA MARKUP
-        with res4:
-            if data:
-                schema_json = build_final_schema(data)
-                st.markdown("**JSON-LD Schema Markup** — incolla in WordPress > Appearance > Theme Editor > header.php oppure usa plugin 'Insert Headers and Footers'")
-                st.code(f'<script type="application/ld+json">\n{schema_json}\n</script>', language="html")
-                copy_button("📋 Copia Schema Markup JSON-LD", f'<script type="application/ld+json">\n{schema_json}\n</script>', "copy_schema")
+                elif key == "servizio":
+                    page = data.get("pagina_servizio",{})
+                    render_service(page)
+                    st.divider()
+                    copy_box("📋 Copia Pagina Servizio", service_to_md(page), "cp_serv")
+
+                elif key == "faq":
+                    faqs = data.get("faq",[])
+                    render_faq(faqs)
+                    st.divider()
+                    copy_box("📋 Copia FAQ (Markdown/Gutenberg)", faq_to_md(faqs), "cp_faq")
+
+                elif key == "schema":
+                    schema_json = build_final_schema(data, _loc, _az)
+                    stype = "LocalBusiness 📍" if _loc.get("indirizzo","").strip() else "Organization 🌐"
+                    st.caption(f"Schema: **{stype}** · Usa plugin WordPress 'Insert Headers and Footers'")
+                    script_block = f'<script type="application/ld+json">\n{schema_json}\n</script>'
+                    st.code(script_block, language="html")
+                    copy_box("📋 Copia Schema JSON-LD", script_block, "cp_schema")
 
         st.divider()
 
-        # ── JSON RAW ─────────────────────────────────────────────────────
-        with st.expander("🔧 JSON Raw (debug / sviluppatori)"):
-            st.code(st.session_state.get("raw_json", "{}"), language="json")
+        with st.expander("🔧 JSON Raw completo (debug / sviluppatori)"):
+            st.code(json.dumps(data, ensure_ascii=False, indent=2), language="json")
 
-        # ── EXPORT ───────────────────────────────────────────────────────
-        export_data = {
+        export = {
             "meta": {
-                "azienda":     st.session_state.get("azienda", ""),
-                "provider":    provider,
-                "model":       model,
-                "in_tokens":   in_t,
-                "out_tokens":  out_t,
-                "cost_usd":    cost_r
+                "azienda": _az, "provider": provider, "model": model,
+                "in_tokens": in_t, "out_tokens": out_t, "cost_usd": cost_r,
+                "local_seo": _loc
             },
             "content": data
         }
         st.download_button(
-            label="⬇️ Scarica tutto (JSON)",
-            data=json.dumps(export_data, ensure_ascii=False, indent=2),
-            file_name=f"geo_content_{st.session_state.get('azienda','brand').replace(' ','_').lower()}.json",
+            "⬇️ Scarica pacchetto completo (JSON)",
+            data=json.dumps(export, ensure_ascii=False, indent=2),
+            file_name=f"geo_alligator_{_az.replace(' ','_').lower()}.json",
             mime="application/json"
         )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
