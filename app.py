@@ -685,7 +685,7 @@ def post_process(
     servizi:   str,
     fatti:     str,
     local_seo: dict,
-    verified_texts: list = None,
+    verified_texts: list = None,   # FIX: testi completi (debrief+RAG+scraping), non URL
     schema_type: str = "LocalBusiness"
 ) -> dict:
     """
@@ -699,7 +699,9 @@ def post_process(
     7. Genera HTML blocks
     Modifica generated in-place, ritorna il dict arricchito.
     """
-    verified_data = verified_texts or []
+    # verified_data: testi reali da cui il Fact Hardener verifica i claim.
+    # Filtra None e stringhe vuote per evitare falsi negativi.
+    verified_data = [t for t in (verified_texts or []) if t and t.strip()]
 
     # 1. Fact hardening su sezioni testuali
     if generated.get("home"):
@@ -725,7 +727,7 @@ def post_process(
         generated["schema_markup"]["organization"]["sameAs"] = same_as
 
     # 6. Quality score
-    generated["quality_score"] = compute_quality_score(generated, local_seo, verified_data)
+    generated["quality_score"] = compute_quality_score(generated, local_seo, verified_data)  # verified_data = testi, non URL
 
     # 7. HTML blocks
     html_blocks = generate_html_blocks(generated)
@@ -1894,13 +1896,13 @@ def main():
                 with st.spinner("🔧 Post-processing: harden facts, quality score, HTML blocks..."):
                     schema_type_pp = "LocalBusiness" if _loc.get("indirizzo","").strip() else "Organization"
                     generated = post_process(
-                        generated   = generated,
-                        azienda     = _az,
-                        servizi     = _sv,
-                        fatti       = _ft,
-                        local_seo   = _loc,
-                        verified_texts = [_ft, rag_txt, scrape_txt],
-                        schema_type = schema_type_pp
+                        generated      = generated,
+                        azienda        = _az,
+                        servizi        = _sv,
+                        fatti          = _ft,
+                        local_seo      = _loc,
+                        verified_texts = [_ft, rag_evidence_str, scrape_content_str],  # FIX: testi reali
+                        schema_type    = schema_type_pp
                     )
 
             progress.progress(100, text="✅ Generazione completata!")
