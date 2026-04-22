@@ -1,44 +1,50 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║     GEO Score™ Content Generator v4 — Alligator Edition                    ║
-║     Senior Python Developer & Data Engineering Build                       ║
+║     GEO Score™ Content Generator v6 — Alligator Edition                    ║
+║     Patch chirurgica anti-spazzatura + GEO-Flow copywriting                ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
-CHANGELOG v4 (anti-hallucination + deep RAG):
+CHANGELOG v6 (patch chirurgica sul v5 — 2 punti critici):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OBJ 1 — GERARCHIA DELLA VERITÀ (System Prompt aggiornato)
-  • Livello 1: Dati RAG (web) + scraping URL sito web
-  • Livello 2: Debrief utente (fatti citabili)
-  • Livello 3: Copywriting SEO/GEO (connette dati, NON inventa)
-  • Vincolo assoluto: vietato inventare numeri/premi non trovati nelle fonti
+FIX 1 — URL FILTER ANTI-SPAZZATURA (sez. 8)
+  • Nuova DENYLIST_DOMAINS: youtube, pandora, facebook, amazon, paginegialle,
+    google/search, scribd, yelp, reddit, ecc. (~50 domini)
+  • Nuova DENYLIST_URL_PATTERNS: /login, /account, /support, /privacy,
+    /cart, utm_source=, ecc. (~40 pattern)
+  • Funzione is_url_clean() filtra PRIMA del sorting per autorità
+  • Settore-agnostico: AUTHORITATIVE_DOMAINS estesa con editoria B2B,
+    tech, retail, e-commerce, certificazioni (non più solo food)
+  • Nuovo campo evidence["url_scartati"] per debug dei filtri
 
-OBJ 2 — RICERCA WEB MULTI-QUERY (Deep RAG)
-  • get_external_evidence(): 3 query distinte (premi, certificazioni, storia)
-  • Aggregazione risultati con deduplicazione
-  • Priorità a fonti .gov, .edu e testate di settore
+FIX 2 — GEO-FLOW COPYWRITING (sez. 9 + 11)
+  • Nuova costante GEO_FLOW_RULES iniettata nel system prompt
+  • Vieta esplicitamente frasi nominali telegrafiche
+  • Impone connettivi logici ('perché', 'tanto che', 'grazie a')
+  • Include 4 esempi bad→good inline (food, SaaS B2B, arredo B2B, moda B2C)
+  • prompt_home/servizio/faq con descrittori espliciti "prosa continuativa"
+  • Esempi di formato atteso iniettati nei prompt modulari (few-shot)
 
-OBJ 3 — SCRAPING DIRETTO URL (BeautifulSoup)
-  • scrape_website(): legge homepage + path /chi-siamo, /about, /awards, /premi
-  • I dati del sito sovrascrivono la conoscenza generica del modello
-  • Timeout e fallback graziosi integrati
+UPDATE — PRICING 2026 (sez. 4)
+  • Haiku 4.5:  $1/$5 per MTok (prima indicato $0.25/$1.25, sbagliato)
+  • Sonnet 4.6: $3/$15 per MTok — DEFAULT raccomandato per GEO
+  • Opus 4.7:   $5/$25 per MTok — nuovo (aprile 2026)
+  • Opus 4.6:   $5/$25 per MTok (unchanged)
+  • Max tokens output allineato a 8192 per tutti i Claude
 
-OBJ 4 — GEO-ENTITY REINFORCEMENT
-  • Entità geografiche ufficiali correlate iniettate nel contesto
-  • Mappa regioni → DOP, IGP, Denominazioni, Fascie olivate, ecc.
-  • Obbliga il modello a citarle nel testo se rilevanti
+COSTO ATTESO PER RUN COMPLETA (home + servizio + FAQ + schema):
+  • Haiku 4.5:   ~$0.06   (bozze, iterazioni rapide)
+  • Sonnet 4.6:  ~$0.18   ← DEFAULT — qualità GEO chirurgica
+  • Opus 4.7:    ~$0.30   (clienti top, copy massimo)
 
-OBJ 5 — CAMPO "fonti_utilizzate" nel JSON finale
-  • Ogni premio deve essere citato con anno corretto trovato nelle fonti
-  • URL reali degli scraping inclusi nell'output
-
-OBJ 6 — BLACKLIST CLICHÉ
-  • Lista nera hard-coded nel prompt: "leader di settore", "eccellenza a 360°",
-    "sinergia", "soluzioni innovative", "paradigma", "ecosistema", ecc.
-  • Sostituzione obbligatoria con dati concreti
-
-CHANGELOG v2/v3 (mantenuti):
-  • repair_json(), generazione modulare, Local SEO, Schema JSON-LD
-  • claude-haiku-4-5-20251001 default, claude-sonnet-4-6 premium
+CHANGELOG v2-v5 (mantenuti integralmente):
+  • RAG multi-query (3 query: premi, certificazioni, storia)
+  • Scraping diretto URL (BeautifulSoup su /chi-siamo /about /premi)
+  • GEO-entity map italiana (DOP/IGP/DOCG per regione)
+  • Fact Hardening System (harden_facts + harden_section)
+  • Entity Block, AI Summary, sameAs builder, Quality Score
+  • HTML blocks pronti per WordPress (Gutenberg + <details> FAQ)
+  • Schema Markup LocalBusiness/Organization con sameAs dinamico
+  • repair_json() + JSON prefill per Anthropic
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -184,30 +190,36 @@ PRICING = {
         "gpt-4.1":      {"input": 0.00200, "output": 0.00800},
     },
     "anthropic": {
-        "claude-haiku-4-5-20251001": {"input": 0.00025, "output": 0.00125},
-        "claude-sonnet-4-6":         {"input": 0.00300, "output": 0.01500},
-        "claude-opus-4-6":           {"input": 0.01500, "output": 0.07500},
+        # Pricing aprile 2026 — fonte: claude.com/pricing
+        "claude-haiku-4-5":   {"input": 0.00100, "output": 0.00500},  # $1/$5 per MTok
+        "claude-sonnet-4-6":  {"input": 0.00300, "output": 0.01500},  # $3/$15 per MTok
+        "claude-opus-4-7":    {"input": 0.00500, "output": 0.02500},  # $5/$25 per MTok (new)
+        "claude-opus-4-6":    {"input": 0.00500, "output": 0.02500},  # $5/$25 per MTok
     }
 }
 
 MODEL_LABELS = {
-    "claude-haiku-4-5-20251001": "Claude Haiku 💰 (default economico)",
-    "claude-sonnet-4-6":         "Claude Sonnet 🔋 (premium — raccomandato per RAG)",
-    "claude-opus-4-6":           "Claude Opus 💎 (massima qualità)",
-    "gpt-4o-mini":               "GPT-4o Mini 💰 (default economico)",
-    "gpt-4o":                    "GPT-4o 🔋 (premium)",
-    "gpt-4.1-mini":              "GPT-4.1 Mini 💰",
-    "gpt-4.1":                   "GPT-4.1 🔋",
+    # Anthropic — raccomandato per GEO
+    "claude-haiku-4-5":   "Claude Haiku 4.5 💰 ($1/$5 — bozze economiche)",
+    "claude-sonnet-4-6":  "Claude Sonnet 4.6 🔋 ($3/$15 — DEFAULT GEO)",
+    "claude-opus-4-7":    "Claude Opus 4.7 💎 ($5/$25 — top quality)",
+    "claude-opus-4-6":    "Claude Opus 4.6 💎 ($5/$25)",
+    # OpenAI
+    "gpt-4o-mini":        "GPT-4o Mini 💰",
+    "gpt-4o":             "GPT-4o 🔋",
+    "gpt-4.1-mini":       "GPT-4.1 Mini 💰",
+    "gpt-4.1":            "GPT-4.1 🔋",
 }
 
 MODEL_MAX_TOKENS = {
-    "gpt-4o-mini":               4096,
-    "gpt-4o":                    4096,
-    "gpt-4.1-mini":              4096,
-    "gpt-4.1":                   4096,
-    "claude-haiku-4-5-20251001": 4096,
-    "claude-sonnet-4-6":         8192,
-    "claude-opus-4-6":           4096,
+    "gpt-4o-mini":        4096,
+    "gpt-4o":             4096,
+    "gpt-4.1-mini":       4096,
+    "gpt-4.1":            4096,
+    "claude-haiku-4-5":   8192,
+    "claude-sonnet-4-6":  8192,
+    "claude-opus-4-7":    8192,
+    "claude-opus-4-6":    8192,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -823,49 +835,173 @@ def format_scrape_for_prompt(scrape_data: dict) -> str:
     return "\n".join(lines)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 8: RICERCA WEB MULTI-QUERY — Deep RAG (OBJ 2)
-# 3 query distinte: premi, certificazioni, storia/fondazione
-# Priorità a .gov, .edu, testate di settore
+# SEZIONE 8: RICERCA WEB MULTI-QUERY — Deep RAG con URL FILTER (v6)
+# 3 query distinte + filtro anti-spazzatura severo
+# Priorità a .gov, .edu, testate business/settore
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Domini da scartare SEMPRE (match esatto o subdomain)
+DENYLIST_DOMAINS = frozenset([
+    # Social media generalisti
+    "youtube.com", "youtu.be", "m.youtube.com",
+    "facebook.com", "m.facebook.com", "fb.com", "fb.me",
+    "instagram.com", "tiktok.com", "twitter.com", "x.com",
+    "pinterest.com", "pinterest.it", "reddit.com",
+    "threads.net", "snapchat.com", "telegram.org", "t.me",
+    # Streaming / music / entertainment
+    "pandora.com", "spotify.com", "soundcloud.com",
+    "apple.com/music", "music.apple.com", "deezer.com",
+    "netflix.com", "twitch.tv",
+    # Marketplace e aggregatori generici
+    "amazon.it", "amazon.com", "ebay.it", "ebay.com",
+    "aliexpress.com", "etsy.com", "wish.com",
+    "trovaprezzi.it", "kelkoo.it", "idealo.it",
+    # Directory spam / yellow pages
+    "paginegialle.it", "paginebianche.it", "cylex.it",
+    "europages.it", "kompass.com", "yalwa.it",
+    "misterimprese.it", "virgilio.it", "tuttocitta.it",
+    # Review aggregators di scarsa qualità
+    "yelp.com", "yelp.it", "yell.com",
+    # Search engines
+    "google.com/search", "bing.com/search", "duckduckgo.com",
+    "search.yahoo.com",
+    # Spam SEO
+    "scribd.com", "slideshare.net", "issuu.com",
+    "pdfcoffee.com", "studocu.com",
+])
+
+# Pattern URL sospetti (login, account, support, ecc.)
+DENYLIST_URL_PATTERNS = (
+    # Autenticazione
+    "/login", "/signin", "/sign-in", "/log-in", "/accedi",
+    "/register", "/signup", "/sign-up", "/registrati",
+    "/logout", "/signout",
+    # Account / profilo
+    "/account", "/profile", "/profilo", "/my-account",
+    "/dashboard", "/cart", "/carrello", "/checkout",
+    "/wishlist", "/lista-desideri",
+    # Support
+    "/support", "/help", "/assistenza", "/contatti",
+    "/ticket", "/helpdesk",
+    # Policy
+    "/privacy", "/cookie", "/terms", "/termini",
+    "/condizioni", "/tos", "/gdpr", "/disclaimer",
+    # Tecnici
+    "/sitemap", "/robots.txt", "/rss", "/feed",
+    "/wp-admin", "/wp-login", "/admin/",
+    # Tag pages
+    "/tag/", "/tags/", "/category/#", "/?s=",
+    # Tracking
+    "utm_source=", "fbclid=", "gclid=",
+)
+
+
+def is_url_clean(url: str) -> bool:
+    """
+    Filtro severo anti-spazzatura. True = URL utilizzabile come fonte.
+    Scarta: social, marketplace, directory spam, pagine login/support/account,
+    pagine privacy/terms, tracking URL, search engine result pages.
+    """
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url.strip().lower())
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+
+    netloc = parsed.netloc.lstrip(".")
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+
+    # Denylist domini
+    for bad in DENYLIST_DOMAINS:
+        if netloc == bad or netloc.endswith("." + bad):
+            return False
+        if "/" in bad:  # Match composito tipo "google.com/search"
+            dom, path_frag = bad.split("/", 1)
+            if (netloc == dom or netloc.endswith("." + dom)) and path_frag in parsed.path:
+                return False
+
+    # Pattern URL cattivi
+    full_url = url.lower()
+    for pattern in DENYLIST_URL_PATTERNS:
+        if pattern in full_url:
+            return False
+
+    # Query string sospettosamente lunga
+    if parsed.query and len(parsed.query) > 200:
+        return False
+
+    return True
+
+
+# Domini autorevoli — settore-agnostico, focus e-commerce/B2B
 AUTHORITATIVE_DOMAINS = [
-    ".gov", ".edu", ".org",
-    "gamberorosso.it", "slowfood.it", "coldiretti.it", "confagricoltura.it",
-    "ismea.it", "istat.it", "cciaa.it", "cameradicommercio.it",
-    "guide.michelin.com", "viadelgusto.it", "olio.com",
-    "theathenaeumhotel.com",  # es. premi internazionali
-    "flos-olei.com", "terraevita.editrice.it", "freshplaza.it",
-    "agrilevante.it", "fieragricola.it", "sana.it",
-    "qualivita.it", "origine.info", "dop-igp.it"
+    # TLD istituzionali
+    ".gov", ".gov.it", ".edu", ".europa.eu", ".int",
+    # Editoria economica italiana
+    "ilsole24ore.com", "repubblica.it", "corriere.it", "ansa.it",
+    "milanofinanza.it", "economy.it", "startupitalia.eu",
+    "economyup.it", "wired.it", "agi.it",
+    # Editoria economica / tech internazionale
+    "reuters.com", "bloomberg.com", "ft.com", "wsj.com",
+    "forbes.com", "forbes.it", "harvardbusiness.org", "hbr.org",
+    "techcrunch.com", "theverge.com", "arstechnica.com", "wired.com",
+    # Istituzioni e registri italiani
+    "camcom.it", "cciaa.it", "registroimprese.it",
+    "unioncamere.gov.it", "agenziaentrate.gov.it",
+    "mise.gov.it", "mimit.gov.it", "istat.it",
+    "ismea.it", "ice.it", "ismeamercati.it",
+    # Certificazioni e qualità
+    "accredia.it", "iso.org", "uni.com", "cen.eu",
+    "qualivita.it", "origine.info", "dop-igp.it",
+    # Associazioni di categoria
+    "confindustria.it", "coldiretti.it", "confcommercio.it",
+    "confartigianato.it", "cna.it", "confagricoltura.it",
+    "federmeccanica.it", "federchimica.it",
+    # Editoria food & hospitality
+    "gamberorosso.it", "slowfood.it", "guide.michelin.com",
+    "flos-olei.com", "freshplaza.it", "foodweb.it",
+    # Editoria retail & e-commerce
+    "gdoweek.it", "mark-up.it", "pambianconews.com",
+    "distribuzionemoderna.info", "netcomm.it", "osservatori.net",
+    # Editoria tech / SaaS / B2B
+    "zerounoweb.it", "01net.it", "cwi.it", "cmi.it",
+    "digital4.biz", "b2b24.it",
+    # Enciclopedico (fallback)
+    "wikipedia.org", "treccani.it",
 ]
 
 def score_source_authority(url: str) -> int:
-    """Punteggio di autorità della fonte (0-10). Più alto = più priorità."""
+    """Score 0-10 di autorità del dominio. Più alto = priorità in ranking."""
     score = 1
     url_lower = url.lower()
+    if any(tld in url_lower for tld in [".gov.", ".gov/", ".edu.", ".edu/", ".europa.eu"]):
+        score += 5
     for domain in AUTHORITATIVE_DOMAINS:
         if domain in url_lower:
             score += 3
-    if any(tld in url_lower for tld in [".gov.", ".gov/", ".edu.", ".edu/"]):
-        score += 5
-    # Wikipedia come fallback enciclopedico
-    if "wikipedia.org" in url_lower:
+            break
+    if "wikipedia.org" in url_lower or "treccani.it" in url_lower:
         score += 2
-    return score
+    return min(score, 10)
 
 
 def get_external_evidence(azienda: str, contesto: str = "") -> dict:
     """
-    Deep RAG: 3 query distinte per raccogliere evidenze granulari.
-    Aggrega risultati, deduplica, ordina per autorità della fonte.
+    Deep RAG settore-agnostico. 3 query multi-intent.
+    Pipeline: DDGS fetch → filtro is_url_clean → sort per autorità → dedup.
     Richiede: pip install duckduckgo-search
-    Fallback gracioso se libreria non disponibile.
     """
     evidence = {
-        "premi_riconoscimenti": [],
+        "premi_riconoscimenti":  [],
         "certificazioni_qualita": [],
-        "storia_fondazione": [],
-        "fonti_aggregate": [],
-        "errori": []
+        "storia_fondazione":     [],
+        "fonti_aggregate":       [],
+        "errori":                [],
+        "url_scartati":          [],  # debug: mostra cosa è stato filtrato
     }
 
     if not azienda:
@@ -880,42 +1016,62 @@ def get_external_evidence(azienda: str, contesto: str = "") -> dict:
         return evidence
 
     queries = {
-        "premi_riconoscimenti": f'"{azienda}" premi riconoscimenti guide settore',
-        "certificazioni_qualita": f'"{azienda}" certificazioni qualità analisi tecniche',
-        "storia_fondazione": f'"{azienda}" storia fondazione sede legale anno',
+        "premi_riconoscimenti":
+            f'"{azienda}" premi riconoscimenti recensioni stampa',
+        "certificazioni_qualita":
+            f'"{azienda}" certificazioni standard qualità',
+        "storia_fondazione":
+            f'"{azienda}" storia fondazione sede team',
     }
 
     seen_urls = set()
 
-    with DDGS() as ddgs:
-        for categoria, query in queries.items():
-            try:
-                raw_results = list(ddgs.text(query, max_results=8, region="it-it"))
-                # Ordina per autorità della fonte
-                raw_results.sort(
-                    key=lambda r: score_source_authority(r.get("href", "")),
+    try:
+        with DDGS() as ddgs:
+            for categoria, query in queries.items():
+                try:
+                    raw_results = list(ddgs.text(query, max_results=10, region="it-it"))
+                except Exception as e:
+                    evidence["errori"].append(f"Query '{categoria}': {str(e)[:100]}")
+                    continue
+
+                # STEP 1: Filtro anti-spazzatura PRIMA del sorting
+                clean_results = []
+                for r in raw_results:
+                    url = r.get("href", "") or r.get("url", "")
+                    if not is_url_clean(url):
+                        evidence["url_scartati"].append(url)
+                        continue
+                    clean_results.append(r)
+
+                # STEP 2: Sort per autorità decrescente
+                clean_results.sort(
+                    key=lambda r: score_source_authority(r.get("href", "") or r.get("url", "")),
                     reverse=True
                 )
-                for r in raw_results:
-                    url = r.get("href", "")
+
+                # STEP 3: Dedup + aggrega
+                for r in clean_results:
+                    url = r.get("href", "") or r.get("url", "")
                     if url in seen_urls:
                         continue
                     seen_urls.add(url)
                     entry = {
                         "titolo":    r.get("title", ""),
-                        "snippet":   r.get("body", ""),
+                        "snippet":   r.get("body", "") or r.get("snippet", ""),
                         "url":       url,
                         "categoria": categoria,
-                        "autorità":  score_source_authority(url)
+                        "autorità":  score_source_authority(url),
                     }
                     evidence[categoria].append(entry)
                     evidence["fonti_aggregate"].append(entry)
-                time.sleep(0.5)  # rispetta rate limit DDG
-            except Exception as e:
-                evidence["errori"].append(f"Query '{categoria}': {str(e)[:80]}")
 
-    # Ordina aggregato per autorità decrescente
+                time.sleep(0.5)  # rate limit politeness
+    except Exception as e:
+        evidence["errori"].append(f"DDGS session: {str(e)[:100]}")
+
     evidence["fonti_aggregate"].sort(key=lambda x: x["autorità"], reverse=True)
+    evidence["fonti_aggregate"] = evidence["fonti_aggregate"][:12]
     return evidence
 
 
@@ -958,14 +1114,106 @@ def extract_source_urls(evidence: dict, scrape_data: dict) -> list:
     return urls[:10]  # max 10 fonti nel JSON finale
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 9: SYSTEM PROMPT BUILDER — GERARCHIA DELLA VERITÀ (OBJ 1 + OBJ 6)
+# SEZIONE 9: SYSTEM PROMPT BUILDER — GERARCHIA VERITÀ + GEO-FLOW (v6)
 # ─────────────────────────────────────────────────────────────────────────────
+
+# GEO-FLOW: regole di flow narrativo per evitare copy telegrafico
+GEO_FLOW_RULES = """
+╔══════════════════════════════════════════════════════════════════╗
+║   GEO-FLOW COPYWRITING — PROSA CITABILE, NON TELEGRAFICA       ║
+╠══════════════════════════════════════════════════════════════════╣
+║ Il testo deve essere FLUIDO e UMANO, non un elenco mascherato.  ║
+║ I dati vanno INTRECCIATI nella narrazione, non stoccati come    ║
+║ bullet points in forma di frase.                                 ║
+╚══════════════════════════════════════════════════════════════════╝
+
+REGOLE DI FLOW (applicazione obbligatoria):
+
+  1. PERIODI COMPLETI, NON FRAMMENTI
+     Ogni frase ha soggetto + verbo + complemento.
+     Vietate le frasi nominali telegrafiche ("Fondata 1890. Sede Milano.").
+
+  2. CONNETTIVI LOGICI OBBLIGATORI
+     Usa: perché, tanto che, al punto di, mentre, grazie a, così che, infatti.
+     Proibiti i punti dopo 4-5 parole che creano spezzatino informativo.
+
+  3. DATI INTRECCIATI, NON ELENCATI
+     ✗ BAD (robotico): "Azienda nata nel 1890. 3 foglie Gambero Rosso. Acidità 0,18%."
+     ✓ GOOD (GEO):    "Attiva dal 1890, l'azienda ha guadagnato le tre foglie del
+                       Gambero Rosso grazie a un'acidità dello 0,18% — un valore che
+                       la colloca sotto la soglia extravergine del 65%."
+
+  4. RITMO — 1 DATO OGGETTIVO OGNI 2 PARAGRAFI
+     Il dato deve essere diluito nel periodo, non isolato a fine frase.
+     ✗ BAD: "Offriamo la migliore assistenza. 24/7. Per tutti i clienti."
+     ✓ GOOD: "L'assistenza è attiva 24 ore su 24, sette giorni su sette,
+             con un tempo medio di risposta sotto i 15 minuti negli ultimi 12 mesi."
+
+  5. LUNGHEZZA FRASI — VARIABILE, MEDIA 18-25 PAROLE
+     Alterna frasi brevi (8-12 parole) e articolate (25-35 parole).
+     Una sequenza di frasi tutte corte suona robotica. Tutte lunghe suona accademica.
+
+  6. VIETATI GLI "ESCO INSERT" DA PROMPT
+     Mai frasi-placeholder come "Ecco i nostri punti di forza:" seguite da elenco.
+     Se un concetto merita una lista, va in <ul> nel markdown — ma PRIMA deve
+     esserci un paragrafo di prosa che lo introduce narrativamente.
+
+  7. VOICE COERENTE
+     B2B e-commerce: "L'azienda" (terza) o "aiutiamo" (prima plurale).
+     B2C: "trovi / scegli" (seconda singolare informale).
+     Scegli UNA voce e mantienila per l'intero modulo.
+
+ESEMPI BAD → GOOD (studia e replica il pattern GOOD):
+
+BAD #1 (pagina servizio SaaS B2B):
+  "Software gestionale B2B. Fattura elettronica. Sincronizzazione cloud.
+   45% tempo risparmiato. Clienti soddisfatti."
+
+GOOD #1:
+  "Il gestionale sincronizza fatturazione elettronica e ordini in tempo reale,
+   eliminando la doppia digitazione che negli studi tradizionali consuma fino
+   al 45% del tempo amministrativo. I 1.200 clienti attivi lo usano per chiudere
+   i mesi contabili in media entro 3 giorni lavorativi."
+
+BAD #2 (homepage oleificio):
+  "Oleificio dal 1890. Olio premiato. Umbria. Frantoio moderno. Acidità bassa."
+
+GOOD #2:
+  "Dal 1890 l'oleificio lavora le olive raccolte nella fascia olivata
+   Assisi-Spoleto, un areale DOP Umbria che concentra polifenoli sopra i
+   250 mg/kg. L'estrazione a freddo entro 4 ore dalla raccolta mantiene
+   l'acidità allo 0,18%, valore che nel 2023 è valso le tre foglie del
+   Gambero Rosso."
+
+BAD #3 (e-commerce B2B arredo):
+  "Arredi ufficio. Consegna rapida. Made in Italy. Garanzia 10 anni."
+
+GOOD #3:
+  "La collezione di arredi per ufficio è prodotta in Veneto con legno FSC
+   certificato e viene consegnata in tutta Italia entro 5 giorni lavorativi.
+   Ogni scrivania e seduta è coperta da una garanzia di 10 anni sulla
+   struttura portante, un'estensione che nel settore contract è raramente
+   superiore ai 5 anni."
+
+BAD #4 (e-commerce B2C moda):
+  "Capi made in Italy. Tessuti pregiati. Spedizione veloce. Reso gratuito."
+
+GOOD #4:
+  "Ogni capo della collezione è cucito in Italia con tessuti certificati OEKO-TEX
+   e ti arriva a casa in 48 ore con corriere espresso. Se non è quello che
+   cercavi, puoi restituirlo gratuitamente entro 30 giorni — un margine più
+   ampio dei 14 giorni minimi previsti dalla normativa europea."
+"""
+
+
 def build_system_prompt(stile_esempi: str = "") -> str:
     alligator_rules = """APPROCCIO ALLIGATOR (OBBLIGATORIO):
-- DIRETTO: Frasi brevi. Soggetto + Verbo + Oggetto. Zero giri di parole.
-- RISULTATI: Ogni affermazione ha una conseguenza misurabile per il cliente.
-- AUTOREVOLE TECNICO: Terminologia di settore. Il lettore è esperto.
-- LEGGIBILE: Periodi max 20 parole. Sottotitoli ogni 100 parole."""
+- DIRETTO ma MAI TELEGRAFICO: frasi complete con soggetto-verbo-complemento.
+- RISULTATI MISURABILI: ogni affermazione ha conseguenza concreta per il cliente.
+- AUTOREVOLE TECNICO: terminologia di settore, lettore considerato esperto.
+- FLUIDO: periodi 18-25 parole media, connettivi logici tra frasi,
+  zero sequenze di frasi-nominali stile "Fondato 1890. Sede Milano."
+"""
 
     style_section = ""
     if stile_esempi and stile_esempi.strip():
@@ -983,7 +1231,7 @@ ISTRUZIONE STILE: Analizza i testi sopra. Identifica lunghezza media frasi, voca
 ║ LIVELLO 1 [MASSIMA PRIORITÀ]:                               ║
 ║   • Dati estratti dalla Ricerca Web (sezione RAG)           ║
 ║   • Contenuti scraping del sito web dell'azienda            ║
-║   → Premi con anno, certificazioni, analisi chimiche,        ║
+║   → Premi con anno, certificazioni, analisi,                 ║
 ║     date di fondazione, sedi, numeri verificati.            ║
 ║                                                              ║
 ║ LIVELLO 2 [ALTA PRIORITÀ]:                                  ║
@@ -997,7 +1245,7 @@ ISTRUZIONE STILE: Analizza i testi sopra. Identifica lunghezza media frasi, voca
 ║ ⛔ VINCOLO CRITICO (ANTI-ALLUCINAZIONE):                    ║
 ║   È SEVERAMENTE VIETATO inventare:                          ║
 ║   • Numeri di premi non trovati nelle fonti                 ║
-║   • Quantità di ristoranti/clienti serviti non verificate   ║
+║   • Quantità di clienti/ordini/partner non verificate       ║
 ║   • Anni di fondazione non confermati dalle fonti           ║
 ║   • Certificazioni non trovate nel RAG o nel sito           ║
 ║   • Punteggi o rating non verificati                        ║
@@ -1017,15 +1265,17 @@ ISTRUZIONE STILE: Analizza i testi sopra. Identifica lunghezza media frasi, voca
 
 {CLICHE_PROMPT_BLOCK}
 
+{GEO_FLOW_RULES}
+
 FRAMEWORK GEO SCORE:
 {GEO_CRITERIA}
 
 REGOLE OUTPUT (ASSOLUTE):
 - Rispondi SOLO con JSON valido. Zero testo fuori dal JSON.
 - NO introduzioni, NO conclusioni, NO commenti, NO markdown fuori JSON.
-- Ogni sezione: minimo 1 dato numerico citabile (solo se verificato dalle fonti).
+- Ogni campo 'intro' e 'body' deve essere prosa fluida di più periodi connessi.
 - Claim autonomi: ogni frase chiave ha senso estratta fuori contesto.
-- Ogni premio citato nel testo DEVE includere l'anno corretto dalla fonte.
+- Ogni premio/dato citato nel testo DEVE includere anno/valore dalla fonte.
 - Il campo "fonti_utilizzate" elenca gli URL reali delle fonti usate."""
 
 
@@ -1077,26 +1327,37 @@ LINGUA OUTPUT: {lingua}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 11: PROMPT MODULARI con campo fonti_utilizzate (OBJ 5)
+# SEZIONE 11: PROMPT MODULARI con descrittori prosa fluida (v6)
 # ─────────────────────────────────────────────────────────────────────────────
 def prompt_home(ctx: str) -> str:
     return f"""{ctx}
 
-Genera SOLO il blocco "home". Rispondi ESCLUSIVAMENTE con questo JSON:
+Genera SOLO il blocco "home". Ogni campo di prosa (intro, body) deve essere
+UN TESTO NARRATIVO CONTINUATIVO, non un elenco di frasi nominali.
+
+ESEMPIO DEL FORMATO ATTESO PER IL CAMPO "intro" (replica lo stile):
+"Dal 1890 [Azienda] produce [prodotto] nella [zona geografica], dove la
+combinazione di [fattore 1] e [fattore 2] ha dato vita a una linea riconosciuta
+dalle guide di settore — nel 2023 con le tre foglie del Gambero Rosso.
+L'approccio tecnico, centrato su [processo specifico], consente di mantenere
+[parametro tecnico verificato] ben sotto la soglia richiesta dalla categoria."
+
+Rispondi ESCLUSIVAMENTE con questo JSON (tutti i campi stringa in italiano,
+prosa fluida, zero frasi-elenco):
 {{
   "home": {{
-    "h1": "Titolo H1 max 60 char, keyword principale — usa dati reali dal RAG",
-    "intro": "150-200 parole. Prima frase = risposta diretta. Minimo 1 dato numerico verificato. Se presente un premio nelle fonti, citalo con anno. Stile Alligator.",
+    "h1": "H1 max 60 char — brand + topic principale + qualificatore concreto",
+    "intro": "180-220 parole di PROSA FLUIDA (non frasi brevi separate da punto). Apri con una frase di risposta diretta che associ brand + topic + dato oggettivo. Intreccia almeno 2 dati numerici dalle fonti (anno fondazione, premi con anno, numeri verificati). Usa connettivi logici (perché, tanto che, grazie a). Stile Alligator ma non telegrafico.",
     "sezione_1": {{
-      "h2": "H2 valore concreto — dato verificato, non generico",
-      "body": "100-150 parole. Dato numerico o fatto unico dalle fonti RAG/sito. Se il dato non c'è nelle fonti, descrivi il processo tecnico."
+      "h2": "H2 descrittivo con un dato/qualificatore concreto — non generico",
+      "body": "120-160 parole di prosa continuativa. Un dato verificato o un processo tecnico spiegato in narrativa. Se il dato non è nelle fonti, descrivi come avviene il processo (es. 'estrazione a freddo entro 4 ore', 'onboarding in 48h') evitando numeri inventati."
     }},
     "sezione_2": {{
-      "h2": "H2 differenziazione specifica",
-      "body": "100-150 parole. Unicità con dati concreti dalle fonti. Zero cliché dalla blacklist."
+      "h2": "H2 differenziazione — cosa distingue il brand con attributi concreti",
+      "body": "120-160 parole di prosa continuativa. Unicità espressa tramite fatti verificabili: certificazioni, processi, aree DOP/IGP se rilevanti, partnership verificabili. Zero cliché dalla blacklist."
     }},
-    "cta": "1 frase imperativa e specifica",
-    "fonti_utilizzate": ["URL1_reale_da_cui_provengono_i_dati", "URL2_se_usato"]
+    "cta": "1 frase imperativa specifica al topic (non generica 'contattaci')",
+    "fonti_utilizzate": ["URL_reale_1", "URL_reale_2"]
   }}
 }}"""
 
@@ -1104,31 +1365,40 @@ Genera SOLO il blocco "home". Rispondi ESCLUSIVAMENTE con questo JSON:
 def prompt_servizio(ctx: str) -> str:
     return f"""{ctx}
 
-Genera SOLO il blocco "pagina_servizio". Rispondi ESCLUSIVAMENTE con questo JSON:
+Genera SOLO il blocco "pagina_servizio". L'intro deve essere prosa fluida;
+SOLO i campi "steps" e "lista" possono contenere elementi brevi stile elenco.
+
+ESEMPIO DEL FORMATO ATTESO PER IL CAMPO "intro":
+"[Servizio] risolve [problema specifico] per [target]: l'azienda integra
+[tecnologia/metodo verificato] con [processo specifico], un approccio che
+riduce [parametro misurabile] rispetto alle soluzioni tradizionali. Il
+risultato è [outcome concreto] con tempi di [metrica verificata]."
+
+Rispondi ESCLUSIVAMENTE con questo JSON:
 {{
   "pagina_servizio": {{
-    "h1": "H1 pagina servizio con keyword long-tail",
-    "intro": "100-150 parole. Cosa ottiene il cliente, non cosa fa l'azienda. Dati verificati dalle fonti.",
+    "h1": "H1 con keyword long-tail + qualificatore specifico (non 'Servizi di X')",
+    "intro": "140-180 parole di PROSA FLUIDA. Apri con l'outcome per il cliente, non con 'Offriamo'. Intreccia 1-2 dati numerici dalle fonti. Usa la voce coerente con il brand (terza persona o prima plurale).",
     "come_funziona": {{
-      "h2": "Come funziona [Servizio] — titolo descrittivo con dato",
+      "h2": "Come funziona — titolo con dato/tempistica concreta",
       "steps": [
-        "Step 1: azione concreta max 2 righe",
-        "Step 2: azione concreta max 2 righe",
-        "Step 3: azione concreta max 2 righe",
-        "Step 4: azione concreta max 2 righe"
+        "Step 1 — 1-2 righe di azione concreta con verbo iniziale (es. 'Analizziamo...', 'Definiamo...')",
+        "Step 2 — 1-2 righe",
+        "Step 3 — 1-2 righe",
+        "Step 4 — 1-2 righe con outcome misurabile"
       ]
     }},
     "benefici": {{
-      "h2": "Titolo con numero specifico es. 4 risultati concreti",
+      "h2": "H2 con numero specifico (es. '4 vantaggi misurabili di...')",
       "lista": [
-        "Beneficio 1 + dato numerico verificato dalle fonti",
-        "Beneficio 2 + dato numerico verificato dalle fonti",
-        "Beneficio 3 + dato numerico verificato dalle fonti",
-        "Beneficio 4 + dato numerico verificato dalle fonti"
+        "Beneficio 1 con dato numerico o comparazione (non 'alta qualità')",
+        "Beneficio 2 con dato",
+        "Beneficio 3 con dato",
+        "Beneficio 4 con dato"
       ]
     }},
-    "cta": "CTA specifica al servizio, imperativa",
-    "fonti_utilizzate": ["URL1_reale", "URL2_se_usato"]
+    "cta": "CTA imperativa al servizio specifico (es. 'Richiedi un audit gratuito', non 'Contattaci')",
+    "fonti_utilizzate": ["URL_reale_1"]
   }}
 }}"""
 
@@ -1136,18 +1406,32 @@ Genera SOLO il blocco "pagina_servizio". Rispondi ESCLUSIVAMENTE con questo JSON
 def prompt_faq(ctx: str) -> str:
     return f"""{ctx}
 
-Genera SOLO il blocco "faq" con 5 domande. Ogni risposta deve usare SOLO dati dalle fonti RAG/sito. Rispondi ESCLUSIVAMENTE con questo JSON:
+Genera SOLO il blocco "faq" con 5 domande. Ogni risposta deve essere prosa
+fluida, autonoma (leggibile fuori contesto), con un dato concreto intrecciato
+(non elencato in coda). Target: AI search engines (Perplexity, SearchGPT)
+che estraggono risposte dirette.
+
+ESEMPIO FORMATO ATTESO:
+  Q: "Quanto tempo serve per ricevere un preventivo personalizzato?"
+  A: "Il preventivo viene elaborato entro 24 ore lavorative dalla ricezione
+     del brief, con un incontro di allineamento da 30 minuti programmato
+     entro 48 ore. Questo processo permette di consegnare stime con
+     scostamento medio inferiore al 10% sul progetto finale, un valore
+     monitorato sui 340 progetti chiusi nel 2024."
+
+Rispondi ESCLUSIVAMENTE con questo JSON (5 coppie Q&A, risposte 80-130 parole
+di PROSA FLUIDA, non elenchi):
 {{
   "faq": [
     {{
-      "domanda": "Query reale motore AI — inizia con Come/Cosa/Quanto/Perché/Chi/Dove",
-      "risposta": "80-120 parole. Autonoma fuori contesto. Include dato concreto verificato. Se il dato non è nelle fonti, descrive il processo tecnico.",
-      "fonte": "URL_fonte_se_disponibile"
+      "domanda": "Query naturale inizia con Come/Cosa/Quanto/Perché/Chi/Dove — deve suonare come una query AI reale",
+      "risposta": "80-130 parole di prosa continuativa. Prima frase = risposta diretta autonoma. Intreccia 1 dato verificato. Se il dato non è nelle fonti, descrivi il processo tecnico senza inventare numeri.",
+      "fonte": "URL_reale_se_dato_verificato_o_stringa_vuota"
     }},
-    {{"domanda": "Domanda 2", "risposta": "Risposta 2 80-120 parole", "fonte": ""}},
-    {{"domanda": "Domanda 3", "risposta": "Risposta 3 80-120 parole", "fonte": ""}},
-    {{"domanda": "Domanda 4", "risposta": "Risposta 4 80-120 parole", "fonte": ""}},
-    {{"domanda": "Domanda 5", "risposta": "Risposta 5 80-120 parole", "fonte": ""}}
+    {{"domanda": "Q2", "risposta": "80-130 parole prosa", "fonte": ""}},
+    {{"domanda": "Q3", "risposta": "80-130 parole prosa", "fonte": ""}},
+    {{"domanda": "Q4", "risposta": "80-130 parole prosa", "fonte": ""}},
+    {{"domanda": "Q5", "risposta": "80-130 parole prosa", "fonte": ""}}
   ]
 }}"""
 
@@ -1401,6 +1685,17 @@ def build_final_schema(data: dict, local_seo: dict, azienda: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 15: UI HELPERS (da v2, invariati)
 # ─────────────────────────────────────────────────────────────────────────────
+def resolve_cta(cta_val) -> str:
+    """
+    Normalizza CTA: accetta sia stringa (vecchio formato AI)
+    che dict {primary, secondary, intent} (nuovo formato post-process v5).
+    Ritorna sempre una stringa usabile nel testo.
+    """
+    if isinstance(cta_val, dict):
+        return cta_val.get("primary", "Contattaci")
+    return str(cta_val) if cta_val else ""
+
+
 def copy_box(label, text, key):
     st.text_area(label, value=text, height=200, key=key,
                  help="Ctrl+A per selezionare tutto → Ctrl+C per copiare")
@@ -1413,7 +1708,7 @@ def render_home(home):
         if s:
             st.markdown(f"**H2 {lbl}:** `{s.get('h2','')}`")
             st.markdown(s.get("body",""))
-    st.markdown(f"**CTA:** _{home.get('cta','')}_")
+    st.markdown(f"**CTA:** _{resolve_cta(home.get('cta',''))}_")
     if home.get("fonti_utilizzate"):
         with st.expander("📎 Fonti utilizzate per questa sezione"):
             for u in home["fonti_utilizzate"]:
@@ -1432,7 +1727,7 @@ def render_service(page):
         st.markdown(f"**H2:** `{ben.get('h2','')}`")
         for b in ben.get("lista", []):
             st.markdown(f"✅ {b}")
-    st.markdown(f"**CTA:** _{page.get('cta','')}_")
+    st.markdown(f"**CTA:** _{resolve_cta(page.get('cta',''))}_")
     if page.get("fonti_utilizzate"):
         with st.expander("📎 Fonti utilizzate per questa sezione"):
             for u in page["fonti_utilizzate"]:
@@ -1451,7 +1746,7 @@ def home_to_md(h):
     for k in ["sezione_1","sezione_2"]:
         s = h.get(k, {})
         if s: t += f"## {s.get('h2','')}\n\n{s.get('body','')}\n\n"
-    t += h.get("cta","")
+    t += resolve_cta(h.get("cta",""))
     fonti = h.get("fonti_utilizzate", [])
     if fonti:
         t += "\n\n---\n**Fonti:** " + " | ".join(fonti)
@@ -1469,7 +1764,7 @@ def service_to_md(p):
         t += f"## {ben.get('h2','')}\n\n"
         for b in ben.get("lista", []): t += f"✅ {b}\n"
         t += "\n"
-    t += p.get("cta","")
+    t += resolve_cta(p.get("cta",""))
     fonti = p.get("fonti_utilizzate", [])
     if fonti:
         t += "\n\n---\n**Fonti:** " + " | ".join(fonti)
@@ -1539,7 +1834,8 @@ def main():
         if provider == "openai":
             opts, dflt = list(PRICING["openai"].keys()), "gpt-4o-mini"
         else:
-            opts, dflt = list(PRICING["anthropic"].keys()), "claude-haiku-4-5-20251001"
+            # Default: Sonnet 4.6 — best trade-off GEO quality / costo ($0.18/run)
+            opts, dflt = list(PRICING["anthropic"].keys()), "claude-sonnet-4-6"
 
         model = st.selectbox("Modello", opts,
                              index=opts.index(dflt) if dflt in opts else 0,
