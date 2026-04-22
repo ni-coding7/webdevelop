@@ -258,6 +258,483 @@ def repair_json(text: str) -> str:
     return text
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 6b: FACT HARDENING SYSTEM
+# Intercetta claim specifici non verificabili e li downgrada o rimuove.
+# Patterns rischiosi: numeri inventati, % non citate, superlativi, premi vagi.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Pattern che segnalano claim ad alto rischio (numeri inventati / non citabili)
+RISKY_PATTERNS = [
+    # percentuali senza fonte
+    (r'\b\d+\s*%\s*(?:di\s+)?(?:clienti|vendite|crescita|aumento|riduzione|risparmio)\b', "dato percentuale non verificato"),
+    # "oltre X anni" vaghi
+    (r'\boltre\s+\d+\s+anni\b', "anni di attività non verificati"),
+    # numeri assoluti grandi senza fonte
+    (r'\b(?:più di|oltre|circa)\s+\d{3,}\s+(?:clienti|prodotti|ordini|partner)\b', "quantità non verificata"),
+    # claim di posizione
+    (r'\b(?:primo|seconda?|terzo|top\s*\d)\s+(?:in italia|al mondo|nel settore)\b', "claim di posizionamento non verificato"),
+    # "da X anni" senza fonte
+    (r'\bda\s+(?:oltre\s+)?\d+\s+anni\b', "anzianità non verificata"),
+]
+
+# Sostituzioni sicure per claim downgraded
+SAFE_REPLACEMENTS = {
+    "dato percentuale non verificato":          "dato in crescita costante",
+    "anni di attività non verificati":          "da diversi anni nel settore",
+    "quantità non verificata":                  "numerosi clienti nel settore",
+    "claim di posizionamento non verificato":   "tra i riferimenti del settore",
+    "anzianità non verificata":                 "con esperienza consolidata nel settore",
+}
+
+
+def harden_facts(text: str, verified_data: list = None) -> dict:
+    """
+    Analizza il testo e:
+    - Identifica claim specifici non verificabili
+    - Downgrade a versione generica se il dato non è in verified_data
+    - Rimuove claim troppo rischiosi (superlativi assoluti senza fonte)
+    Ritorna dict con testo hardenato + log delle modifiche.
+    """
+    if not text:
+        return {"text": text, "verified": [], "generic": [], "removed": []}
+
+    verified_list = verified_data or []
+    generic_changes = []
+    removed_claims  = []
+    hardened        = text
+
+    for pattern, label in RISKY_PATTERNS:
+        matches = re.findall(pattern, hardened, flags=re.IGNORECASE)
+        for match in matches:
+            # Controlla se il dato appare anche nei verified_data (fonti RAG/debrief)
+            is_verified = any(match.lower() in v.lower() for v in verified_list)
+            if not is_verified:
+                replacement = SAFE_REPLACEMENTS.get(label, "dato non specificato")
+                hardened = re.sub(re.escape(match), replacement, hardened, flags=re.IGNORECASE)
+                generic_changes.append(f'"{match}" → "{replacement}" ({label})')
+
+    # Rimuovi claim superlativi assoluti senza contesto verificabile
+    superlative_patterns = [
+        r'\bla migliore?\b', r'\bil più\b', r'\bl\'unico\b', r'\binsuperabile\b',
+        r'\bineguagliabile\b', r'\bimpareggiabile\b'
+    ]
+    for sp in superlative_patterns:
+        matches = re.findall(sp, hardened, flags=re.IGNORECASE)
+        for m in matches:
+            is_verified = any(m.lower() in v.lower() for v in verified_list)
+            if not is_verified:
+                removed_claims.append(f'"{m}" rimosso (superlativo assoluto non verificato)')
+                hardened = re.sub(re.escape(m), "", hardened, flags=re.IGNORECASE)
+
+    return {
+        "text":    hardened,
+        "verified": verified_list,
+        "generic":  generic_changes,
+        "removed":  removed_claims
+    }
+
+
+def harden_section(section_dict: dict, verified_data: list = None) -> dict:
+    """
+    Applica harden_facts ricorsivamente a tutti i valori stringa di un dict.
+    Aggiunge campo data_validation al dict.
+    """
+    if not isinstance(section_dict, dict):
+        return section_dict
+
+    all_generic = []
+    all_removed = []
+
+    def _harden_value(v):
+        if isinstance(v, str):
+            result = harden_facts(v, verified_data)
+            all_generic.extend(result["generic"])
+            all_removed.extend(result["removed"])
+            return result["text"]
+        elif isinstance(v, dict):
+            return {k: _harden_value(val) for k, val in v.items()}
+        elif isinstance(v, list):
+            return [_harden_value(item) for item in v]
+        return v
+
+    hardened = {k: _harden_value(v) for k, v in section_dict.items()}
+
+    # Inietta data_validation nel blocco
+    hardened["data_validation"] = {
+        "verified_fields": verified_data or [],
+        "generic_fields":  list(dict.fromkeys(all_generic)),  # deduplica
+        "removed_claims":  list(dict.fromkeys(all_removed)),
+    }
+    return hardened
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 6c: ENTITY SYSTEM (FONDAMENTALE PER GEO)
+# Popola automaticamente dai dati input la struttura entity standard.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_entity_block(azienda: str, servizi: str, local_seo: dict, schema_type: str = "LocalBusiness") -> dict:
+    """
+    Costruisce il blocco entities standard da iniettare nel JSON finale.
+    Parsea indirizzo, estrae città/regione/nazione, split servizi.
+    """
+    indirizzo = local_seo.get("indirizzo", "")
+    parts     = [p.strip() for p in indirizzo.split(",") if p.strip()] if indirizzo else []
+
+    # Estrai componenti indirizzo (formato: Via, Città, CAP, Provincia)
+    city    = parts[1] if len(parts) > 1 else ""
+    region  = parts[3] if len(parts) > 3 else ""
+
+    # Mappa provincia → regione se non specificata
+    PROV_TO_REGION = {
+        "BT":"Puglia","BA":"Puglia","LE":"Puglia","BR":"Puglia","TA":"Puglia","FG":"Puglia",
+        "PG":"Umbria","TR":"Umbria","FI":"Toscana","SI":"Toscana","AR":"Toscana","LU":"Toscana",
+        "MI":"Lombardia","BS":"Lombardia","BG":"Lombardia","MN":"Lombardia",
+        "NA":"Campania","SA":"Campania","AV":"Campania","CE":"Campania",
+        "RM":"Lazio","VT":"Lazio","LT":"Lazio","FR":"Lazio",
+        "PA":"Sicilia","CT":"Sicilia","ME":"Sicilia","AG":"Sicilia",
+        "CA":"Sardegna","SS":"Sardegna","NU":"Sardegna",
+        "AN":"Marche","MC":"Marche","AP":"Marche",
+        "CS":"Calabria","RC":"Calabria","KR":"Calabria","CZ":"Calabria",
+        "AQ":"Abruzzo","PE":"Abruzzo","CH":"Abruzzo","TE":"Abruzzo",
+        "TO":"Piemonte","CN":"Piemonte","AT":"Piemonte","AL":"Piemonte",
+        "VE":"Veneto","PD":"Veneto","VR":"Veneto","VI":"Veneto","TV":"Veneto",
+        "BO":"Emilia Romagna","MO":"Emilia Romagna","PR":"Emilia Romagna","RE":"Emilia Romagna",
+        "TN":"Trentino","BZ":"Trentino",
+    }
+    prov = parts[3] if len(parts) > 3 else ""
+    if not region and prov:
+        region = PROV_TO_REGION.get(prov.upper(), "")
+
+    # Split servizi in lista
+    servizi_list = [s.strip() for s in re.split(r"[,;\n·•\-]+", servizi) if s.strip()][:8]
+
+    return {
+        "brand":    azienda,
+        "type":     schema_type,
+        "location": {
+            "city":    city,
+            "region":  region,
+            "country": "Italia"
+        },
+        "services": servizi_list,
+        "products": []   # popolato dall'AI se rilevante
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 6d: CTA STRUTTURATE
+# Trasforma CTA stringa in oggetto con primary/secondary/intent.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_structured_cta(cta_raw: str, section_type: str = "generic") -> dict:
+    """
+    Converte una CTA stringa in struttura con primary/secondary/intent.
+    section_type: 'home' | 'service' | 'faq' | 'generic'
+    """
+    SECONDARY_MAP = {
+        "home":    "Scopri i nostri servizi",
+        "service": "Leggi le domande frequenti",
+        "faq":     "Contattaci per maggiori informazioni",
+        "generic": "Scopri di più",
+    }
+    INTENT_MAP = {
+        "home":    "awareness",
+        "service": "conversion",
+        "faq":     "consideration",
+        "generic": "conversion",
+    }
+    return {
+        "primary":   cta_raw if cta_raw else "Contattaci",
+        "secondary": SECONDARY_MAP.get(section_type, "Scopri di più"),
+        "intent":    INTENT_MAP.get(section_type, "conversion"),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 6e: QUALITY SCORE SYSTEM
+# Calcola score E-E-A-T / SEO / GEO e risk_level sul JSON generato.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_quality_score(data: dict, local_seo: dict, source_urls: list) -> dict:
+    """
+    Calcola quality_score basato su:
+    - E-E-A-T: fonti citate, indirizzo presente, sameAs, autori
+    - SEO: H1 presente, meta description, FAQ strutturate
+    - GEO: schema completo, entità geografiche, ai_summary, entities block
+    - risk_level: presenza claim hardened o rimossi
+    Ritorna dict con scores 0-10 e risk_level.
+    """
+    eeat = 0
+    seo  = 0
+    geo  = 0
+
+    # ── E-E-A-T ──────────────────────────────────────────────────────────────
+    if source_urls:                                      eeat += 2   # fonti citate
+    if local_seo.get("indirizzo","").strip():            eeat += 2   # indirizzo verificabile
+    if local_seo.get("linkedin","").strip():             eeat += 1   # sameAs LinkedIn
+    if local_seo.get("url","").strip():                  eeat += 1   # sito ufficiale
+    home = data.get("home", {})
+    if home.get("fonti_utilizzate"):                     eeat += 2   # fonti nel contenuto
+    if data.get("schema_markup"):                        eeat += 2   # schema credibilità
+
+    # ── SEO ──────────────────────────────────────────────────────────────────
+    if home.get("h1"):                                   seo  += 2   # H1 presente
+    serv = data.get("pagina_servizio", {})
+    if serv.get("h1"):                                   seo  += 1   # H1 servizio
+    if data.get("faq") and len(data["faq"]) >= 3:        seo  += 2   # FAQ strutturate
+    if data.get("schema_markup"):                        seo  += 2   # schema JSON-LD
+    if home.get("sezione_1",{}).get("h2"):               seo  += 1   # H2 presente
+    if serv.get("come_funziona",{}).get("steps"):        seo  += 1   # lista step (rich results)
+    # Penalità: H1 troppo corto
+    h1 = home.get("h1","")
+    if h1 and len(h1) < 20:                              seo  -= 1
+
+    # ── GEO ──────────────────────────────────────────────────────────────────
+    if data.get("ai_summary"):                           geo  += 2   # ai_summary presente
+    if data.get("entities"):                             geo  += 2   # entity block presente
+    if data.get("schema_markup"):
+        org = data["schema_markup"].get("organization",{})
+        if org.get("knowsAbout"):                        geo  += 1   # topical authority
+        if org.get("sameAs"):                            geo  += 1   # sameAs links
+    meta = data.get("_meta_fonti",{})
+    if meta.get("geo_entities"):                         geo  += 2   # entità geografiche
+    if meta.get("rag_attivo"):                           geo  += 1   # RAG attivo
+    if meta.get("scraping_attivo"):                      geo  += 1   # scraping attivo
+
+    # Normalizza 0-10
+    eeat = min(10, max(0, eeat))
+    seo  = min(10, max(0, seo))
+    geo  = min(10, max(0, geo))
+
+    # Risk level: basato su data_validation aggregato
+    total_removed = 0
+    total_generic = 0
+    for key in ["home", "pagina_servizio"]:
+        dv = data.get(key, {}).get("data_validation", {})
+        total_removed += len(dv.get("removed_claims", []))
+        total_generic += len(dv.get("generic_fields",  []))
+
+    if total_removed >= 3:
+        risk = "high"
+    elif total_removed >= 1 or total_generic >= 3:
+        risk = "medium"
+    else:
+        risk = "low"
+
+    return {
+        "eeat":       eeat,
+        "seo":        seo,
+        "geo":        geo,
+        "risk_level": risk
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 6f: HTML BLOCK GENERATOR
+# Genera HTML pronto per WordPress/Gutenberg da ogni sezione JSON.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_html_blocks(data: dict) -> dict:
+    """
+    Genera blocchi HTML autonomi per ogni sezione.
+    Ritorna dict {home_html, service_html, faq_html} pronti per incollare in WP.
+    """
+    html_blocks = {}
+
+    # ── HOME HTML ─────────────────────────────────────────────────────────────
+    home = data.get("home", {})
+    if home:
+        cta_obj = home.get("cta", {})
+        cta_text = cta_obj.get("primary", cta_obj) if isinstance(cta_obj, dict) else str(cta_obj)
+        h = f'<h1>{_esc(home.get("h1",""))}</h1>\n'
+        h += f'<p>{_esc(home.get("intro",""))}</p>\n'
+        s1 = home.get("sezione_1", {})
+        if s1:
+            h += f'<h2>{_esc(s1.get("h2",""))}</h2>\n'
+            h += f'<p>{_esc(s1.get("body",""))}</p>\n'
+        s2 = home.get("sezione_2", {})
+        if s2:
+            h += f'<h2>{_esc(s2.get("h2",""))}</h2>\n'
+            h += f'<p>{_esc(s2.get("body",""))}</p>\n'
+        h += f'<a class="wp-block-button__link" href="#contatti">{_esc(cta_text)}</a>\n'
+        html_blocks["home_html"] = h
+
+    # ── SERVICE HTML ──────────────────────────────────────────────────────────
+    serv = data.get("pagina_servizio", {})
+    if serv:
+        cta_obj = serv.get("cta", {})
+        cta_text = cta_obj.get("primary", cta_obj) if isinstance(cta_obj, dict) else str(cta_obj)
+        s = f'<h1>{_esc(serv.get("h1",""))}</h1>\n'
+        s += f'<p>{_esc(serv.get("intro",""))}</p>\n'
+        cf = serv.get("come_funziona", {})
+        if cf:
+            s += f'<h2>{_esc(cf.get("h2",""))}</h2>\n<ol>\n'
+            for step in cf.get("steps", []):
+                s += f'  <li>{_esc(step)}</li>\n'
+            s += '</ol>\n'
+        ben = serv.get("benefici", {})
+        if ben:
+            s += f'<h2>{_esc(ben.get("h2",""))}</h2>\n<ul>\n'
+            for b in ben.get("lista", []):
+                s += f'  <li>{_esc(b)}</li>\n'
+            s += '</ul>\n'
+        s += f'<a class="wp-block-button__link" href="#contatti">{_esc(cta_text)}</a>\n'
+        html_blocks["service_html"] = s
+
+    # ── FAQ HTML (accordion WP) ────────────────────────────────────────────────
+    faqs = data.get("faq", [])
+    if faqs:
+        f = '<div class="faq-block">\n'
+        for faq in faqs:
+            f += f'  <details>\n'
+            f += f'    <summary>{_esc(faq.get("domanda",""))}</summary>\n'
+            f += f'    <p>{_esc(faq.get("risposta",""))}</p>\n'
+            f += f'  </details>\n'
+        f += '</div>\n'
+        html_blocks["faq_html"] = f
+
+    return html_blocks
+
+
+def _esc(text: str) -> str:
+    """Escape HTML minimo per contenuto testuale."""
+    if not text:
+        return ""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 6g: SAMEAS BUILDER AUTOMATICO
+# Costruisce lista sameAs da tutti i dati disponibili.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_same_as(local_seo: dict, extra_socials: list = None) -> list:
+    """
+    Aggiunge automaticamente:
+    - URL sito ufficiale
+    - LinkedIn (se presente)
+    - Google Maps (se coordinate GPS disponibili)
+    - Social aggiuntivi opzionali
+    """
+    same_as = []
+    url     = local_seo.get("url","").strip()
+    linkedin = local_seo.get("linkedin","").strip()
+    lat     = local_seo.get("gps_lat","").strip()
+    lon     = local_seo.get("gps_lon","").strip()
+
+    if url:      same_as.append(url)
+    if linkedin: same_as.append(linkedin)
+    if lat and lon:
+        maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+        same_as.append(maps_url)
+    if extra_socials:
+        same_as.extend([s for s in extra_socials if s and s not in same_as])
+
+    return same_as
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 6h: AI SUMMARY BUILDER
+# Genera ai_summary sintetico dai dati input (senza chiamata AI aggiuntiva).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_ai_summary(azienda: str, servizi: str, local_seo: dict, fatti: str) -> str:
+    """
+    Costruisce ai_summary lato Python (0 token aggiuntivi).
+    Formato: Chi è + Cosa fa + Dove opera.
+    Massimo 160 caratteri per compatibilità meta description.
+    """
+    city   = ""
+    indirizzo = local_seo.get("indirizzo","")
+    if indirizzo:
+        parts = [p.strip() for p in indirizzo.split(",") if p.strip()]
+        city  = parts[1] if len(parts) > 1 else parts[0] if parts else ""
+
+    # Primo servizio come attività principale
+    primo_servizio = servizi.split(",")[0].strip() if servizi else ""
+
+    # Primo fatto citabile come differenziatore
+    primo_fatto = fatti.split("·")[0].strip() if "·" in fatti else fatti.split("\n")[0].strip() if fatti else ""
+    primo_fatto = primo_fatto.strip('"').strip("'")
+
+    parts_summary = [azienda]
+    if primo_servizio:
+        parts_summary.append(f"specializzata in {primo_servizio}")
+    if city:
+        parts_summary.append(f"con sede a {city}")
+    if primo_fatto:
+        parts_summary.append(primo_fatto)
+
+    summary = ". ".join(parts_summary) + "."
+    # Tronca a 160 char senza spezzare parole
+    if len(summary) > 160:
+        summary = summary[:157].rsplit(" ", 1)[0] + "..."
+    return summary
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 6i: POST-PROCESS PIPELINE GLOBALE
+# Applica harden_facts, entities, ai_summary, sameAs, quality_score, html
+# all'intero output generato dalle sezioni AI.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def post_process(
+    generated: dict,
+    azienda:   str,
+    servizi:   str,
+    fatti:     str,
+    local_seo: dict,
+    verified_texts: list = None,
+    schema_type: str = "LocalBusiness"
+) -> dict:
+    """
+    Pipeline post-processing globale:
+    1. Harden facts su home + pagina_servizio
+    2. Struttura CTA
+    3. Inietta entities block
+    4. Genera ai_summary
+    5. Aggiorna sameAs nello schema markup
+    6. Calcola quality_score
+    7. Genera HTML blocks
+    Modifica generated in-place, ritorna il dict arricchito.
+    """
+    verified_data = verified_texts or []
+
+    # 1. Fact hardening su sezioni testuali
+    if generated.get("home"):
+        generated["home"] = harden_section(generated["home"], verified_data)
+    if generated.get("pagina_servizio"):
+        generated["pagina_servizio"] = harden_section(generated["pagina_servizio"], verified_data)
+
+    # 2. CTA strutturate
+    for key, stype in [("home","home"), ("pagina_servizio","service")]:
+        section = generated.get(key, {})
+        if section and isinstance(section.get("cta"), str):
+            section["cta"] = build_structured_cta(section["cta"], stype)
+
+    # 3. Entities block
+    generated["entities"] = build_entity_block(azienda, servizi, local_seo, schema_type)
+
+    # 4. AI Summary
+    generated["ai_summary"] = build_ai_summary(azienda, servizi, local_seo, fatti)
+
+    # 5. sameAs aggiornato nello schema
+    same_as = build_same_as(local_seo)
+    if same_as and generated.get("schema_markup",{}).get("organization"):
+        generated["schema_markup"]["organization"]["sameAs"] = same_as
+
+    # 6. Quality score
+    generated["quality_score"] = compute_quality_score(generated, local_seo, verified_data)
+
+    # 7. HTML blocks
+    html_blocks = generate_html_blocks(generated)
+    generated.update(html_blocks)
+
+    return generated
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 7: SCRAPING DIRETTO URL (OBJ 3)
 # Tenta di leggere homepage + pagine /chi-siamo /about /premi /awards
 # I dati estratti sovrascrivono la conoscenza generica del modello.
@@ -679,22 +1156,28 @@ def prompt_schema(ctx: str, azienda: str, local_seo: dict, faq_data: list) -> st
     linkedin  = local_seo.get("linkedin", "")
     schema_type = "LocalBusiness" if indirizzo.strip() else "Organization"
 
+    # Orari: nuovo formato stringa "09:00-13:00, 15:00-19:00"
     orari = local_seo.get("orari", {})
-    orari_str = ""
+    orari_lines = []
     giorni_map = {
         "Lunedì": "Monday", "Martedì": "Tuesday", "Mercoledì": "Wednesday",
         "Giovedì": "Thursday", "Venerdì": "Friday", "Sabato": "Saturday", "Domenica": "Sunday"
     }
-    for g, (ap, ch) in orari.items():
-        if ap and ch:
-            g_clean = g.replace("ì","i").replace("è","e").replace("é","e")
-            orari_str += f"{giorni_map.get(g_clean, g)}: {ap}-{ch} | "
+    for g, orario_val in orari.items():
+        g_en = giorni_map.get(g, g)
+        if isinstance(orario_val, str) and orario_val.strip():
+            orari_lines.append(f"{g_en}: {orario_val.strip()}")
+        elif isinstance(orario_val, (tuple, list)) and len(orario_val) == 2:
+            ap, ch = orario_val
+            if ap and ch:
+                orari_lines.append(f"{g_en}: {ap}-{ch}")
+    orari_str = " | ".join(orari_lines) if orari_lines else "non specificati"
 
     return f"""{ctx}
 SCHEMA TYPE: {schema_type}
 URL: {url_sito}
 LINKEDIN: {linkedin if linkedin else "da compilare"}
-ORARI: {orari_str if orari_str else "non specificati"}
+ORARI: {orari_str}
 
 Genera SOLO il blocco "schema_markup". Usa SOLO dati verificati dalle fonti per la descrizione. Rispondi ESCLUSIVAMENTE con questo JSON:
 {{
@@ -791,8 +1274,31 @@ def parse_json_response(raw: str) -> Optional[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 14: SCHEMA MARKUP BUILDER (da v2)
+# SEZIONE 14: SCHEMA MARKUP BUILDER (aggiornato v5)
+# Supporta nuovo formato orari stringa: "09:00-13:00, 15:00-19:00"
+# Usa sameAs da build_same_as() + Product schema se rilevante
 # ─────────────────────────────────────────────────────────────────────────────
+
+def parse_orario_str(orario_str: str) -> list:
+    """
+    Parsea stringa orario nel nuovo formato: "09:00-13:00, 15:00-19:00"
+    Ritorna lista di tuple (apertura, chiusura) per ogni fascia oraria.
+    Supporta sia formato singolo "09:00-18:00" che multiplo con virgola.
+    """
+    if not orario_str or not orario_str.strip():
+        return []
+    
+    fasce = []
+    # Split per virgola — separa le fasce orarie multiple
+    parti = [p.strip() for p in orario_str.split(",") if p.strip()]
+    for parte in parti:
+        # Ogni parte è "HH:MM-HH:MM"
+        match = re.match(r'^(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$', parte.strip())
+        if match:
+            fasce.append((match.group(1), match.group(2)))
+    return fasce
+
+
 def build_final_schema(data: dict, local_seo: dict, azienda: str) -> str:
     schema_raw = data.get("schema_markup", {})
     org        = dict(schema_raw.get("organization", {}))
@@ -809,8 +1315,14 @@ def build_final_schema(data: dict, local_seo: dict, azienda: str) -> str:
     org["@type"]    = schema_type
     org["@context"] = "https://schema.org"
     org["name"]     = azienda
-    if url_sito: org["url"]    = url_sito
-    if linkedin: org["sameAs"] = [linkedin]
+    if url_sito: org["url"] = url_sito
+
+    # sameAs: usa build_same_as() per includere GPS + tutti i social
+    same_as = build_same_as(local_seo)
+    if same_as:
+        org["sameAs"] = same_as
+    elif linkedin:
+        org["sameAs"] = [linkedin]
 
     if indirizzo:
         parts = [p.strip() for p in indirizzo.split(",")]
@@ -833,19 +1345,35 @@ def build_final_schema(data: dict, local_seo: dict, azienda: str) -> str:
         except ValueError:
             pass
 
+    # Orari: supporta sia nuovo formato stringa che legacy tuple (apertura, chiusura)
     giorni_map = {
         "Lunedì": "Monday", "Martedì": "Tuesday", "Mercoledì": "Wednesday",
         "Giovedì": "Thursday", "Venerdì": "Friday", "Sabato": "Saturday", "Domenica": "Sunday"
     }
     oh = []
-    for g_it, (apertura, chiusura) in orari.items():
-        if apertura and chiusura:
-            oh.append({
-                "@type":     "OpeningHoursSpecification",
-                "dayOfWeek": f"https://schema.org/{giorni_map.get(g_it, g_it)}",
-                "opens":     apertura,
-                "closes":    chiusura
-            })
+    for g_it, orario_val in orari.items():
+        day_en = giorni_map.get(g_it, g_it)
+        
+        # Nuovo formato: stringa "09:00-13:00, 15:00-19:00"
+        if isinstance(orario_val, str):
+            fasce = parse_orario_str(orario_val)
+            for (apertura, chiusura) in fasce:
+                oh.append({
+                    "@type":     "OpeningHoursSpecification",
+                    "dayOfWeek": f"https://schema.org/{day_en}",
+                    "opens":     apertura,
+                    "closes":    chiusura
+                })
+        # Legacy formato: tuple (apertura, chiusura)
+        elif isinstance(orario_val, (tuple, list)) and len(orario_val) == 2:
+            apertura, chiusura = orario_val
+            if apertura and chiusura:
+                oh.append({
+                    "@type":     "OpeningHoursSpecification",
+                    "dayOfWeek": f"https://schema.org/{day_en}",
+                    "opens":     apertura,
+                    "closes":    chiusura
+                })
     if oh:
         org["openingHoursSpecification"] = oh
 
@@ -959,7 +1487,7 @@ def faq_to_md(faqs):
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
-        page_title="GEO Score™ v4 — Alligator Anti-Hallucination",
+        page_title="GEO Score™ v5 — Alligator Advanced GEO",
         page_icon="🐊",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -994,8 +1522,8 @@ def main():
 
     st.markdown("""
     <div class="geo-header">
-        <h1>🐊 GEO Score™ Content Generator v4 — Anti-Hallucination Edition</h1>
-        <p>Deep RAG · URL Scraping · GEO-Entity Reinforcement · Gerarchia della Verità · Cliché Blacklist · Framework GEO Score™ by Nico Fioretti</p>
+        <h1>🐊 GEO Score™ Content Generator v5 — Advanced GEO Edition</h1>
+        <p>Deep RAG · URL Scraping · GEO-Entity · Fact Hardening · Entity System · Quality Score · HTML Blocks · AI Summary · Framework GEO Score™ by Nico Fioretti</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1115,22 +1643,22 @@ def main():
             gps_lon  = st.text_input("Longitudine GPS (opz.)", key="gps_lon",
                                       placeholder="16.2934")
 
-        # GRIGLIA ORARI
-        st.markdown("**🕐 Orari di Apertura** *(lascia vuoto = chiuso)*")
+        # GRIGLIA ORARI — formato unico stringa "09:00-13:00, 15:00-19:00"
+        st.markdown("**🕐 Orari di Apertura** *(lascia vuoto = chiuso · es: 09:00-13:00, 15:00-19:00)*")
         giorni = ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
         orari_dict = {}
-        h_cols = st.columns([2,2,2])
+        h_cols = st.columns([2, 5])
         h_cols[0].markdown("**Giorno**")
-        h_cols[1].markdown("**Apertura**")
-        h_cols[2].markdown("**Chiusura**")
+        h_cols[1].markdown("**Orario** *(es. 09:00-13:00 oppure 09:00-13:00, 15:00-19:00)*")
         for giorno in giorni:
-            row = st.columns([2,2,2])
+            row = st.columns([2, 5])
             row[0].markdown(f"*{giorno}*")
-            ap = row[1].text_input("", key=f"ap_{giorno}", placeholder="09:00",
-                                    label_visibility="collapsed")
-            ch = row[2].text_input("", key=f"ch_{giorno}", placeholder="18:00",
-                                    label_visibility="collapsed")
-            orari_dict[giorno] = (ap, ch)
+            orario_str = row[1].text_input(
+                "", key=f"orario_{giorno}",
+                placeholder="09:00-13:00, 15:00-19:00",
+                label_visibility="collapsed"
+            )
+            orari_dict[giorno] = orario_str  # stringa grezza, parsata da parse_orario_str()
 
         indirizzo_completo = ", ".join(filter(None, [
             st.session_state.get("via",""),
@@ -1359,6 +1887,22 @@ def main():
                     "url_scraping":  _loc.get("url","")
                 }
 
+            # ── POST-PROCESS PIPELINE v5 ───────────────────────────────
+            # Applica: fact hardening, CTA strutturate, entities, ai_summary,
+            # sameAs automatico, quality_score, HTML blocks
+            if generated:
+                with st.spinner("🔧 Post-processing: harden facts, quality score, HTML blocks..."):
+                    schema_type_pp = "LocalBusiness" if _loc.get("indirizzo","").strip() else "Organization"
+                    generated = post_process(
+                        generated   = generated,
+                        azienda     = _az,
+                        servizi     = _sv,
+                        fatti       = _ft,
+                        local_seo   = _loc,
+                        verified_texts = [_ft, rag_txt, scrape_txt],
+                        schema_type = schema_type_pp
+                    )
+
             progress.progress(100, text="✅ Generazione completata!")
 
             st.session_state["generated"]  = generated
@@ -1380,7 +1924,7 @@ def main():
     # TAB 3: RISULTATI
     # ═══════════════════════════════════════════════════════════════════════
     with tab3:
-        st.subheader("📄 Risultati — Anti-Hallucination v4")
+        st.subheader("📄 Risultati — Anti-Hallucination v5 · GEO Advanced")
 
         if not st.session_state.get("generated"):
             st.info("🔄 Vai al tab **🛠️ Generatore** per creare i contenuti.")
@@ -1398,6 +1942,32 @@ def main():
         m2.metric("Token Output", f"{out_t:,}")
         m3.metric("Totale Token", f"{in_t+out_t:,}")
         m4.metric("Costo Reale",  f"${cost_r:.5f}")
+
+        # ── Quality Score (v5) ────────────────────────────────────────
+        qs = data.get("quality_score", {})
+        if qs:
+            st.markdown("#### 📊 Quality Score v5")
+            q1, q2, q3, q4 = st.columns(4)
+            q1.metric("E-E-A-T", f"{qs.get('eeat',0)}/10")
+            q2.metric("SEO",     f"{qs.get('seo', 0)}/10")
+            q3.metric("GEO",     f"{qs.get('geo', 0)}/10")
+            risk = qs.get("risk_level", "low")
+            risk_icon = "🟢" if risk == "low" else "🟡" if risk == "medium" else "🔴"
+            q4.metric("Risk Level", f"{risk_icon} {risk}")
+
+        # ── AI Summary (v5) ───────────────────────────────────────────
+        ai_sum = data.get("ai_summary", "")
+        if ai_sum:
+            st.markdown(
+                f'<div class="truth-box"><b>🤖 AI Summary</b> <em>(GEO — chi è, cosa fa, dove opera)</em><br>{ai_sum}</div>',
+                unsafe_allow_html=True
+            )
+
+        # ── Entities (v5) ─────────────────────────────────────────────
+        entities = data.get("entities", {})
+        if entities:
+            with st.expander("🏷️ Entity Block (GEO)"):
+                st.json(entities)
 
         # Mostra fonti aggregate se disponibili
         meta = data.get("_meta_fonti", {})
@@ -1432,18 +2002,43 @@ def main():
                     render_home(home)
                     st.divider()
                     copy_box("📋 Copia Homepage (Markdown/Gutenberg)", home_to_md(home), "cp_home")
+                    # HTML pronto per WordPress (v5)
+                    if data.get("home_html"):
+                        copy_box("📋 Copia Homepage (HTML WordPress)", data["home_html"], "cp_home_html")
+                    # data_validation report
+                    dv = home.get("data_validation", {})
+                    if dv.get("generic_fields") or dv.get("removed_claims"):
+                        with st.expander(f"⚠️ Fact Hardening Report — {len(dv.get('generic_fields',[]))} downgrade, {len(dv.get('removed_claims',[]))} rimossi"):
+                            for g in dv.get("generic_fields", []):
+                                st.markdown(f"🟡 {g}")
+                            for r in dv.get("removed_claims", []):
+                                st.markdown(f"🔴 {r}")
 
                 elif key == "servizio":
                     page = data.get("pagina_servizio", {})
                     render_service(page)
                     st.divider()
                     copy_box("📋 Copia Pagina Servizio", service_to_md(page), "cp_serv")
+                    # HTML pronto per WordPress (v5)
+                    if data.get("service_html"):
+                        copy_box("📋 Copia Servizio (HTML WordPress)", data["service_html"], "cp_serv_html")
+                    # data_validation report
+                    dv = page.get("data_validation", {})
+                    if dv.get("generic_fields") or dv.get("removed_claims"):
+                        with st.expander(f"⚠️ Fact Hardening Report — {len(dv.get('generic_fields',[]))} downgrade, {len(dv.get('removed_claims',[]))} rimossi"):
+                            for g in dv.get("generic_fields", []):
+                                st.markdown(f"🟡 {g}")
+                            for r in dv.get("removed_claims", []):
+                                st.markdown(f"🔴 {r}")
 
                 elif key == "faq":
                     faqs = data.get("faq", [])
                     render_faq(faqs)
                     st.divider()
                     copy_box("📋 Copia FAQ (Markdown/Gutenberg)", faq_to_md(faqs), "cp_faq")
+                    # HTML pronto per WordPress (v5)
+                    if data.get("faq_html"):
+                        copy_box("📋 Copia FAQ (HTML WordPress <details>)", data["faq_html"], "cp_faq_html")
 
                 elif key == "schema":
                     schema_json = build_final_schema(data, _loc, _az)
@@ -1478,7 +2073,7 @@ def main():
         st.download_button(
             "⬇️ Scarica pacchetto completo (JSON con fonti)",
             data=json.dumps(export, ensure_ascii=False, indent=2),
-            file_name=f"geo_alligator_v4_{_az.replace(' ','_').lower()}.json",
+            file_name=f"geo_alligator_v5_{_az.replace(' ','_').lower()}.json",
             mime="application/json"
         )
 
