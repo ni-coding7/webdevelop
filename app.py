@@ -88,12 +88,15 @@ CLICHE_PROMPT_BLOCK = f"""BLACKLIST TERMINI VIETATI (ASSOLUTO — zero eccezioni
 I seguenti termini/frasi sono PROIBITI in qualsiasi output:
 {chr(10).join(f'  ✗ "{t}"' for t in CLICHE_BLACKLIST)}
 
-REGOLA SOSTITUZIONE OBBLIGATORIA:
-  ✗ "olio di eccellenza" → ✓ "olio premiato con 3 Foglie Gambero Rosso 2023"
-  ✗ "leader di settore" → ✓ "secondo produttore italiano per volume certificato DOP [fonte]"
-  ✗ "soluzioni innovative" → ✓ "sistema brevettato che riduce i tempi del 40%"
-  ✗ "alta qualità" → ✓ "acidità 0,18% — sotto la soglia extra vergine del 65%"
-Se non hai il dato reale per sostituire: descrivi il processo tecnico verificabile."""
+REGOLA SOSTITUZIONE OBBLIGATORIA (sostituisci genericità con dati REALI dalle fonti):
+  ✗ "olio di eccellenza" → ✓ "olio premiato con [premio specifico SE NELLE FONTI]"
+  ✗ "leader di settore" → ✓ "[posizionamento concreto SE VERIFICATO da fonte]"
+  ✗ "soluzioni innovative" → ✓ "[descrizione tecnica del sistema/metodo]"
+  ✗ "alta qualità" → ✓ "[parametro tecnico verificato dalle fonti, oppure descrizione discorsiva del processo se mancano dati]"
+
+⚠️ CRITICO: i numeri di sostituzione devono provenire SOLO da fonti RAG/debrief.
+   Se non hai il dato reale: descrivi il processo in modo DISCORSIVO senza
+   inventare percentuali, soglie, tempistiche o quantità."""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 3: GEO-ENTITY MAP ITALIANA (OBJ 4)
@@ -184,42 +187,31 @@ def get_geo_entities(testo_contesto: str) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 PRICING = {
     "openai": {
-        "gpt-4o-mini":  {"input": 0.00015, "output": 0.00060},
-        "gpt-4o":       {"input": 0.00250, "output": 0.01000},
-        "gpt-4.1-mini": {"input": 0.00040, "output": 0.00160},
-        "gpt-4.1":      {"input": 0.00200, "output": 0.00800},
+        "gpt-4o-mini": {"input": 0.00015, "output": 0.00060},
+        "gpt-4o":      {"input": 0.00250, "output": 0.01000},
     },
     "anthropic": {
-        # Pricing aprile 2026 — fonte: claude.com/pricing
-        "claude-haiku-4-5":   {"input": 0.00100, "output": 0.00500},  # $1/$5 per MTok
-        "claude-sonnet-4-6":  {"input": 0.00300, "output": 0.01500},  # $3/$15 per MTok
-        "claude-opus-4-7":    {"input": 0.00500, "output": 0.02500},  # $5/$25 per MTok (new)
-        "claude-opus-4-6":    {"input": 0.00500, "output": 0.02500},  # $5/$25 per MTok
+        # Model IDs API ufficiali (alias *-latest puntano sempre alla release più recente)
+        "claude-3-5-haiku-latest":  {"input": 0.00080, "output": 0.00400},
+        "claude-3-5-sonnet-latest": {"input": 0.00300, "output": 0.01500},
+        "claude-3-opus-latest":     {"input": 0.01500, "output": 0.07500},
     }
 }
 
 MODEL_LABELS = {
-    # Anthropic — raccomandato per GEO
-    "claude-haiku-4-5":   "Claude Haiku 4.5 💰 ($1/$5 — bozze economiche)",
-    "claude-sonnet-4-6":  "Claude Sonnet 4.6 🔋 ($3/$15 — DEFAULT GEO)",
-    "claude-opus-4-7":    "Claude Opus 4.7 💎 ($5/$25 — top quality)",
-    "claude-opus-4-6":    "Claude Opus 4.6 💎 ($5/$25)",
-    # OpenAI
-    "gpt-4o-mini":        "GPT-4o Mini 💰",
-    "gpt-4o":             "GPT-4o 🔋",
-    "gpt-4.1-mini":       "GPT-4.1 Mini 💰",
-    "gpt-4.1":            "GPT-4.1 🔋",
+    "claude-3-5-haiku-latest":  "Claude 3.5 Haiku 💰 (bozze economiche)",
+    "claude-3-5-sonnet-latest": "Claude 3.5 Sonnet 🔋 (DEFAULT GEO)",
+    "claude-3-opus-latest":     "Claude 3 Opus 💎 (top quality)",
+    "gpt-4o-mini":              "GPT-4o Mini 💰",
+    "gpt-4o":                   "GPT-4o 🔋",
 }
 
 MODEL_MAX_TOKENS = {
-    "gpt-4o-mini":        4096,
-    "gpt-4o":             4096,
-    "gpt-4.1-mini":       4096,
-    "gpt-4.1":            4096,
-    "claude-haiku-4-5":   8192,
-    "claude-sonnet-4-6":  8192,
-    "claude-opus-4-7":    8192,
-    "claude-opus-4-6":    8192,
+    "gpt-4o-mini":              4096,
+    "gpt-4o":                   4096,
+    "claude-3-5-haiku-latest":  8192,
+    "claude-3-5-sonnet-latest": 8192,
+    "claude-3-opus-latest":     4096,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -896,45 +888,21 @@ DENYLIST_URL_PATTERNS = (
 )
 
 
-def is_url_clean(url: str) -> bool:
+def is_valid_url(url: str) -> bool:
     """
-    Filtro severo anti-spazzatura. True = URL utilizzabile come fonte.
-    Scarta: social, marketplace, directory spam, pagine login/support/account,
-    pagine privacy/terms, tracking URL, search engine result pages.
+    Filtro anti-spazzatura semplificato.
+    Scarta URL che contengono: youtube, google, facebook, pandora, login, support, account, signin.
     """
     if not url or not isinstance(url, str):
         return False
-    try:
-        parsed = urlparse(url.strip().lower())
-    except Exception:
-        return False
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        return False
+    url_lower = url.lower()
+    blocked = ("youtube", "google", "facebook", "pandora",
+               "login", "support", "account", "signin")
+    return not any(bad in url_lower for bad in blocked)
 
-    netloc = parsed.netloc.lstrip(".")
-    if netloc.startswith("www."):
-        netloc = netloc[4:]
 
-    # Denylist domini
-    for bad in DENYLIST_DOMAINS:
-        if netloc == bad or netloc.endswith("." + bad):
-            return False
-        if "/" in bad:  # Match composito tipo "google.com/search"
-            dom, path_frag = bad.split("/", 1)
-            if (netloc == dom or netloc.endswith("." + dom)) and path_frag in parsed.path:
-                return False
-
-    # Pattern URL cattivi
-    full_url = url.lower()
-    for pattern in DENYLIST_URL_PATTERNS:
-        if pattern in full_url:
-            return False
-
-    # Query string sospettosamente lunga
-    if parsed.query and len(parsed.query) > 200:
-        return False
-
-    return True
+# Backward compat: alias per il vecchio nome (usato nello scraping eventualmente)
+is_url_clean = is_valid_url
 
 
 # Domini autorevoli — settore-agnostico, focus e-commerce/B2B
@@ -992,7 +960,7 @@ def score_source_authority(url: str) -> int:
 def get_external_evidence(azienda: str, contesto: str = "") -> dict:
     """
     Deep RAG settore-agnostico. 3 query multi-intent.
-    Pipeline: DDGS fetch → filtro is_url_clean → sort per autorità → dedup.
+    Pipeline: DDGS fetch → filtro is_valid_url + match nome azienda → sort autorità → dedup.
     Richiede: pip install duckduckgo-search
     """
     evidence = {
@@ -1015,6 +983,8 @@ def get_external_evidence(azienda: str, contesto: str = "") -> dict:
         )
         return evidence
 
+    azienda_lower = azienda.lower().strip()
+
     queries = {
         "premi_riconoscimenti":
             f'"{azienda}" premi riconoscimenti recensioni stampa',
@@ -1035,23 +1005,31 @@ def get_external_evidence(azienda: str, contesto: str = "") -> dict:
                     evidence["errori"].append(f"Query '{categoria}': {str(e)[:100]}")
                     continue
 
-                # STEP 1: Filtro anti-spazzatura PRIMA del sorting
-                clean_results = []
+                # DOPPIO FILTRO: URL valido + nome azienda presente in title/body
+                valid_results = []
                 for r in raw_results:
-                    url = r.get("href", "") or r.get("url", "")
-                    if not is_url_clean(url):
+                    url   = r.get("href", "") or r.get("url", "")
+                    title = (r.get("title", "") or "").lower()
+                    body  = (r.get("body", "") or r.get("snippet", "") or "").lower()
+
+                    # 1° check: URL non spazzatura
+                    if not is_valid_url(url):
                         evidence["url_scartati"].append(url)
                         continue
-                    clean_results.append(r)
+                    # 2° check: nome azienda DEVE comparire in title o body
+                    if azienda_lower not in title and azienda_lower not in body:
+                        evidence["url_scartati"].append(url)
+                        continue
+                    valid_results.append(r)
 
-                # STEP 2: Sort per autorità decrescente
-                clean_results.sort(
+                # Sort per autorità decrescente
+                valid_results.sort(
                     key=lambda r: score_source_authority(r.get("href", "") or r.get("url", "")),
                     reverse=True
                 )
 
-                # STEP 3: Dedup + aggrega
-                for r in clean_results:
+                # Dedup + aggrega
+                for r in valid_results:
                     url = r.get("href", "") or r.get("url", "")
                     if url in seen_urls:
                         continue
@@ -1125,6 +1103,7 @@ GEO_FLOW_RULES = """
 ║ Il testo deve essere FLUIDO e UMANO, non un elenco mascherato.  ║
 ║ I dati vanno INTRECCIATI nella narrazione, non stoccati come    ║
 ║ bullet points in forma di frase.                                 ║
+║ ⚠️ I NUMERI vanno usati SOLO se presenti nelle fonti RAG/debrief║
 ╚══════════════════════════════════════════════════════════════════╝
 
 REGOLE DI FLOW (applicazione obbligatoria):
@@ -1137,21 +1116,21 @@ REGOLE DI FLOW (applicazione obbligatoria):
      Usa: perché, tanto che, al punto di, mentre, grazie a, così che, infatti.
      Proibiti i punti dopo 4-5 parole che creano spezzatino informativo.
 
-  3. DATI INTRECCIATI, NON ELENCATI
-     ✗ BAD (robotico): "Azienda nata nel 1890. 3 foglie Gambero Rosso. Acidità 0,18%."
-     ✓ GOOD (GEO):    "Attiva dal 1890, l'azienda ha guadagnato le tre foglie del
-                       Gambero Rosso grazie a un'acidità dello 0,18% — un valore che
-                       la colloca sotto la soglia extravergine del 65%."
+  3. DATI INTRECCIATI, NON ELENCATI (e SOLO se verificati)
+     ✗ BAD (robotico):  "Azienda nata nel 1890. Premiata. Acidità bassa."
+     ✓ GOOD (GEO):      "Attiva da fine Ottocento, l'azienda ha guadagnato
+                         riconoscimenti nelle guide di settore grazie a un'acidità
+                         contenuta — un valore che la colloca tra gli extravergini."
+     ⚠️ NOTA CRITICA: usa numeri SOLO se presenti nelle fonti RAG/debrief.
+        Mai inventare percentuali, anni, quantità, soglie tecniche.
 
-  4. RITMO — 1 DATO OGGETTIVO OGNI 2 PARAGRAFI
-     Il dato deve essere diluito nel periodo, non isolato a fine frase.
-     ✗ BAD: "Offriamo la migliore assistenza. 24/7. Per tutti i clienti."
-     ✓ GOOD: "L'assistenza è attiva 24 ore su 24, sette giorni su sette,
-             con un tempo medio di risposta sotto i 15 minuti negli ultimi 12 mesi."
+  4. RITMO — DATI OGGETTIVI INTRECCIATI (se disponibili)
+     Quando il dato esiste nelle fonti, dilluiscilo nel periodo, non isolarlo.
+     Quando manca, mantieni il flow discorsivo SENZA quantificare.
 
   5. LUNGHEZZA FRASI — VARIABILE, MEDIA 18-25 PAROLE
      Alterna frasi brevi (8-12 parole) e articolate (25-35 parole).
-     Una sequenza di frasi tutte corte suona robotica. Tutte lunghe suona accademica.
+     Una sequenza di frasi tutte corte suona robotica. Tutte lunghe accademica.
 
   6. VIETATI GLI "ESCO INSERT" DA PROMPT
      Mai frasi-placeholder come "Ecco i nostri punti di forza:" seguite da elenco.
@@ -1163,46 +1142,53 @@ REGOLE DI FLOW (applicazione obbligatoria):
      B2C: "trovi / scegli" (seconda singolare informale).
      Scegli UNA voce e mantienila per l'intero modulo.
 
-ESEMPI BAD → GOOD (studia e replica il pattern GOOD):
+ESEMPI BAD → GOOD (studia il pattern di FLUSSO, NON copiare i numeri):
 
-BAD #1 (pagina servizio SaaS B2B):
+BAD #1 (telegrafico, SaaS B2B):
   "Software gestionale B2B. Fattura elettronica. Sincronizzazione cloud.
-   45% tempo risparmiato. Clienti soddisfatti."
+   Tempo risparmiato. Clienti soddisfatti."
 
-GOOD #1:
+GOOD #1 (discorsivo, senza numeri inventati):
   "Il gestionale sincronizza fatturazione elettronica e ordini in tempo reale,
-   eliminando la doppia digitazione che negli studi tradizionali consuma fino
-   al 45% del tempo amministrativo. I 1.200 clienti attivi lo usano per chiudere
-   i mesi contabili in media entro 3 giorni lavorativi."
+   eliminando la doppia digitazione che negli studi tradizionali consuma una
+   quota significativa del tempo amministrativo. Gli studi che lo adottano lo
+   usano per chiudere i mesi contabili in tempi più rapidi rispetto al flusso
+   manuale tradizionale."
 
-BAD #2 (homepage oleificio):
+BAD #2 (telegrafico, food/oleificio):
   "Oleificio dal 1890. Olio premiato. Umbria. Frantoio moderno. Acidità bassa."
 
-GOOD #2:
-  "Dal 1890 l'oleificio lavora le olive raccolte nella fascia olivata
-   Assisi-Spoleto, un areale DOP Umbria che concentra polifenoli sopra i
-   250 mg/kg. L'estrazione a freddo entro 4 ore dalla raccolta mantiene
-   l'acidità allo 0,18%, valore che nel 2023 è valso le tre foglie del
-   Gambero Rosso."
+GOOD #2 (discorsivo, processo SENZA tempistiche inventate):
+  "Da fine Ottocento l'oleificio lavora le olive coltivate in Umbria,
+   un areale riconosciuto per le proprie denominazioni di origine.
+   L'estrazione a freddo preserva i composti aromatici delle drupe e
+   contiene l'acidità entro le soglie previste per la categoria
+   extravergine."
 
-BAD #3 (e-commerce B2B arredo):
-  "Arredi ufficio. Consegna rapida. Made in Italy. Garanzia 10 anni."
+BAD #3 (telegrafico, e-commerce B2B arredo):
+  "Arredi ufficio. Consegna rapida. Made in Italy. Garanzia estesa."
 
-GOOD #3:
-  "La collezione di arredi per ufficio è prodotta in Veneto con legno FSC
-   certificato e viene consegnata in tutta Italia entro 5 giorni lavorativi.
-   Ogni scrivania e seduta è coperta da una garanzia di 10 anni sulla
-   struttura portante, un'estensione che nel settore contract è raramente
-   superiore ai 5 anni."
+GOOD #3 (discorsivo, no claim numerici inventati):
+  "La collezione di arredi per ufficio è prodotta in Italia con materiali
+   tracciabili e viene distribuita su tutto il territorio nazionale.
+   Ogni elemento della linea contract è coperto da una garanzia sulla
+   struttura portante più ampia rispetto agli standard di mercato del segmento."
 
-BAD #4 (e-commerce B2C moda):
-  "Capi made in Italy. Tessuti pregiati. Spedizione veloce. Reso gratuito."
+BAD #4 (telegrafico, e-commerce B2C moda):
+  "Capi made in Italy. Tessuti pregiati. Spedizione veloce. Reso facile."
 
-GOOD #4:
-  "Ogni capo della collezione è cucito in Italia con tessuti certificati OEKO-TEX
-   e ti arriva a casa in 48 ore con corriere espresso. Se non è quello che
-   cercavi, puoi restituirlo gratuitamente entro 30 giorni — un margine più
-   ampio dei 14 giorni minimi previsti dalla normativa europea."
+GOOD #4 (discorsivo, no quantificazioni inventate):
+  "Ogni capo della collezione è cucito in Italia con tessuti certificati
+   e ti arriva a casa con corriere espresso. Se non è quello che cercavi,
+   puoi restituirlo gratuitamente entro la finestra prevista — un margine
+   più ampio dei minimi richiesti dalla normativa europea."
+
+REGOLA MASTER:
+I numeri che vedi nei prompt-template (es. "180-220 parole", "120-160 parole")
+sono ISTRUZIONI DI FORMATO per te. NON copiarli mai nel testo finale.
+I numeri che inserisci nel testo finale devono provenire ESCLUSIVAMENTE
+dalle fonti RAG o dal debrief utente. In assenza di dati: flow discorsivo
+SENZA quantificare.
 """
 
 
@@ -1225,6 +1211,27 @@ ANALISI TONO DI VOCE — ESEMPI REALI DEL BRAND:
 ISTRUZIONE STILE: Analizza i testi sopra. Identifica lunghezza media frasi, vocabolario ricorrente, struttura titoli, uso numeri. Replica ESATTAMENTE quel tono. Non interpretare, non migliorare: replica."""
 
     truth_hierarchy = """
+╔══════════════════════════════════════════════════════════════╗
+║   ⛔ DIVIETO ASSOLUTO DI ASSUNZIONI DI SETTORE ⛔           ║
+╠══════════════════════════════════════════════════════════════╣
+║ È SEVERAMENTE VIETATO inserire pratiche standard di mercato, ║
+║ tempistiche, o specifiche tecniche (es. "estrazione a freddo ║
+║ entro 4 ore", "molitura entro 6 ore", "fermentazione 12 mesi"║
+║ "consegna in 24/48h", "garanzia 2 anni") se NON sono         ║
+║ ESPRESSAMENTE scritte nelle fonti RAG o nel debrief utente.  ║
+║                                                              ║
+║ Se ti manca il dato esatto: NON inventarlo, NON dedurlo da   ║
+║ pratiche di settore, NON usare valori "tipici". Resta su un  ║
+║ piano puramente discorsivo, descrivendo la natura del        ║
+║ processo SENZA numeri, tempi o soglie specifiche.            ║
+║                                                              ║
+║ ESEMPIO BAD (assunzione inventata):                          ║
+║   "L'estrazione avviene a freddo entro 4 ore dalla raccolta" ║
+║ ESEMPIO GOOD (discorsivo, no numeri inventati):              ║
+║   "L'estrazione avviene a freddo, preservando i composti      ║
+║    aromatici nella fase di lavorazione delle olive."         ║
+╚══════════════════════════════════════════════════════════════╝
+
 ╔══════════════════════════════════════════════════════════════╗
 ║         GERARCHIA DELLA VERITÀ — VINCOLO ASSOLUTO           ║
 ╠══════════════════════════════════════════════════════════════╣
@@ -1251,7 +1258,7 @@ ISTRUZIONE STILE: Analizza i testi sopra. Identifica lunghezza media frasi, voca
 ║   • Punteggi o rating non verificati                        ║
 ║                                                              ║
 ║ SE UN DATO NON È NELLE FONTI:                               ║
-║   → Descrivi il PROCESSO TECNICO verificabile               ║
+║   → Descrivi il processo SENZA numeri/tempi/soglie          ║
 ║   → Usa "secondo i dati aziendali" per dati da debrief      ║
 ║   → NON usare numeri inventati o approssimativi              ║
 ╚══════════════════════════════════════════════════════════════╝"""
@@ -1350,7 +1357,7 @@ prosa fluida, zero frasi-elenco):
     "intro": "180-220 parole di PROSA FLUIDA (non frasi brevi separate da punto). Apri con una frase di risposta diretta che associ brand + topic + dato oggettivo. Intreccia almeno 2 dati numerici dalle fonti (anno fondazione, premi con anno, numeri verificati). Usa connettivi logici (perché, tanto che, grazie a). Stile Alligator ma non telegrafico.",
     "sezione_1": {{
       "h2": "H2 descrittivo con un dato/qualificatore concreto — non generico",
-      "body": "120-160 parole di prosa continuativa. Un dato verificato o un processo tecnico spiegato in narrativa. Se il dato non è nelle fonti, descrivi come avviene il processo (es. 'estrazione a freddo entro 4 ore', 'onboarding in 48h') evitando numeri inventati."
+      "body": "120-160 parole di prosa continuativa. Un dato verificato dalle fonti o, se manca, descrizione DISCORSIVA del processo SENZA numeri/tempistiche inventate. Esempio approccio descrittivo: 'L'azienda integra il processo X preservando le caratteristiche Y'. NON inventare percentuali, ore, soglie tecniche."
     }},
     "sezione_2": {{
       "h2": "H2 differenziazione — cosa distingue il brand con attributi concreti",
@@ -1411,13 +1418,15 @@ fluida, autonoma (leggibile fuori contesto), con un dato concreto intrecciato
 (non elencato in coda). Target: AI search engines (Perplexity, SearchGPT)
 che estraggono risposte dirette.
 
-ESEMPIO FORMATO ATTESO:
+ESEMPIO FORMATO ATTESO (lo schema, NON i numeri — quelli vanno dalle fonti):
   Q: "Quanto tempo serve per ricevere un preventivo personalizzato?"
-  A: "Il preventivo viene elaborato entro 24 ore lavorative dalla ricezione
-     del brief, con un incontro di allineamento da 30 minuti programmato
-     entro 48 ore. Questo processo permette di consegnare stime con
-     scostamento medio inferiore al 10% sul progetto finale, un valore
-     monitorato sui 340 progetti chiusi nel 2024."
+  A: "Il preventivo viene elaborato a seguito della ricezione del brief, con
+     un incontro di allineamento dedicato a definire l'ambito del progetto.
+     Questo processo permette di consegnare stime allineate al budget reale
+     del cliente, riducendo gli scostamenti rispetto al flusso di richiesta
+     standard via form."
+  ⚠️ NOTA: l'esempio è VOLUTAMENTE senza numeri specifici. Inserisci ore,
+     percentuali, quantità SOLO se sono presenti nelle fonti RAG/debrief.
 
 Rispondi ESCLUSIVAMENTE con questo JSON (5 coppie Q&A, risposte 80-130 parole
 di PROSA FLUIDA, non elenchi):
@@ -1834,8 +1843,8 @@ def main():
         if provider == "openai":
             opts, dflt = list(PRICING["openai"].keys()), "gpt-4o-mini"
         else:
-            # Default: Sonnet 4.6 — best trade-off GEO quality / costo ($0.18/run)
-            opts, dflt = list(PRICING["anthropic"].keys()), "claude-sonnet-4-6"
+            # Default: Sonnet 3.5 — best trade-off GEO quality / costo
+            opts, dflt = list(PRICING["anthropic"].keys()), "claude-3-5-sonnet-latest"
 
         model = st.selectbox("Modello", opts,
                              index=opts.index(dflt) if dflt in opts else 0,
