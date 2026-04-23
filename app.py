@@ -187,23 +187,30 @@ def get_geo_entities(testo_contesto: str) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 PRICING = {
     "openai": {
-        "gpt-4o-mini": {"input": 0.00015, "output": 0.00060},
-        "gpt-4o":      {"input": 0.00250, "output": 0.01000},
+        "gpt-4o-mini":  {"input": 0.00015, "output": 0.00060},
+        "gpt-4o":       {"input": 0.00250, "output": 0.01000},
     },
     "anthropic": {
-        # Model IDs API ufficiali (alias *-latest puntano sempre alla release più recente)
-        "claude-3-5-haiku-latest":  {"input": 0.00080, "output": 0.00400},
-        "claude-3-5-sonnet-latest": {"input": 0.00300, "output": 0.01500},
-        "claude-3-opus-latest":     {"input": 0.01500, "output": 0.07500},
+        "claude-3-5-haiku-20241022":  {"input": 0.00100, "output": 0.00500},
+        "claude-3-5-sonnet-20241022": {"input": 0.00300, "output": 0.01500},
+        "claude-3-opus-20240229":     {"input": 0.01500, "output": 0.07500},
     }
 }
 
 MODEL_LABELS = {
-    "claude-3-5-haiku-latest":  "Claude 3.5 Haiku 💰 (bozze economiche)",
-    "claude-3-5-sonnet-latest": "Claude 3.5 Sonnet 🔋 (DEFAULT GEO)",
-    "claude-3-opus-latest":     "Claude 3 Opus 💎 (top quality)",
-    "gpt-4o-mini":              "GPT-4o Mini 💰",
-    "gpt-4o":                   "GPT-4o 🔋",
+    "claude-3-5-haiku-20241022":  "Claude 3.5 Haiku 💰 (Economico)",
+    "claude-3-5-sonnet-20241022": "Claude 3.5 Sonnet 🔋 (Raccomandato per GEO)",
+    "claude-3-opus-20240229":     "Claude 3 Opus 💎 (Massima qualità)",
+    "gpt-4o-mini":                "GPT-4o Mini 💰",
+    "gpt-4o":                     "GPT-4o 🔋",
+}
+
+MODEL_MAX_TOKENS = {
+    "gpt-4o-mini":                4096, 
+    "gpt-4o":                     4096,
+    "claude-3-5-haiku-20241022":  8192, 
+    "claude-3-5-sonnet-20241022": 8192, 
+    "claude-3-opus-20240229":     4096,
 }
 
 MODEL_MAX_TOKENS = {
