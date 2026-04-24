@@ -206,11 +206,11 @@ MODEL_LABELS = {
 }
 
 MODEL_MAX_TOKENS = {
-    "gpt-4o-mini":                4096, 
-    "gpt-4o":                     4096,
-    "claude-haiku-4-5-20251001":  8192, 
-    "claude-sonnet-4-6": 8192, 
-    "claude-sonnet-4-6":     4096,
+    "gpt-4o-mini":               4096,
+    "gpt-4o":                    4096,
+    "claude-haiku-4-5-20251001": 8192,
+    "claude-sonnet-4-6":         8192,
+    "claude-opus-4-7":           8192,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,55 +379,32 @@ def harden_section(section_dict: dict, verified_data: list = None) -> dict:
 def build_entity_block(azienda: str, servizi: str, local_seo: dict, schema_type: str = "LocalBusiness") -> dict:
     """
     Costruisce il blocco entities standard da iniettare nel JSON finale.
-    Parsea indirizzo, estrae città/regione/nazione, split servizi.
+    Fix v6: parsing indirizzo corretto (usato parse_address), awards come array.
     """
     indirizzo = local_seo.get("indirizzo", "")
-    parts     = [p.strip() for p in indirizzo.split(",") if p.strip()] if indirizzo else []
+    addr = parse_address(indirizzo)  # usa il parser robusto della Patch 2
 
-    # Estrai componenti indirizzo (formato: Via, Città, CAP, Provincia)
-    city    = parts[1] if len(parts) > 1 else ""
-    region  = parts[3] if len(parts) > 3 else ""
-
-    # Mappa provincia → regione se non specificata
-    PROV_TO_REGION = {
-        "BT":"Puglia","BA":"Puglia","LE":"Puglia","BR":"Puglia","TA":"Puglia","FG":"Puglia",
-        "PG":"Umbria","TR":"Umbria","FI":"Toscana","SI":"Toscana","AR":"Toscana","LU":"Toscana",
-        "MI":"Lombardia","BS":"Lombardia","BG":"Lombardia","MN":"Lombardia",
-        "NA":"Campania","SA":"Campania","AV":"Campania","CE":"Campania",
-        "RM":"Lazio","VT":"Lazio","LT":"Lazio","FR":"Lazio",
-        "PA":"Sicilia","CT":"Sicilia","ME":"Sicilia","AG":"Sicilia",
-        "CA":"Sardegna","SS":"Sardegna","NU":"Sardegna",
-        "AN":"Marche","MC":"Marche","AP":"Marche",
-        "CS":"Calabria","RC":"Calabria","KR":"Calabria","CZ":"Calabria",
-        "AQ":"Abruzzo","PE":"Abruzzo","CH":"Abruzzo","TE":"Abruzzo",
-        "TO":"Piemonte","CN":"Piemonte","AT":"Piemonte","AL":"Piemonte",
-        "VE":"Veneto","PD":"Veneto","VR":"Veneto","VI":"Veneto","TV":"Veneto",
-        "BO":"Emilia Romagna","MO":"Emilia Romagna","PR":"Emilia Romagna","RE":"Emilia Romagna",
-        "TN":"Trentino","BZ":"Trentino",
-    }
-    prov = parts[3] if len(parts) > 3 else ""
-    if not region and prov:
-        region = PROV_TO_REGION.get(prov.upper(), "")
-
-    # Split servizi in lista
     servizi_list = [s.strip() for s in re.split(r"[,;\n·•\-]+", servizi) if s.strip()][:8]
 
     return {
-        "brand":    azienda,
-        "type":     schema_type,
+        "brand": azienda,
+        "type": schema_type,
         "location": {
-            "city":    city,
-            "region":  region,
-            "country": "Italia"
+            "streetAddress": addr.get("streetAddress", ""),
+            "city": addr.get("addressLocality", ""),
+            "postalCode": addr.get("postalCode", ""),
+            "region": addr.get("addressRegion", ""),
+            "country": "Italia",
         },
         "services": servizi_list,
-        "products": []   # popolato dall'AI se rilevante
+        "products": [],   # popolato dall'AI se rilevante
+        "awards": [],     # popolato dal post_process se estratti dai fatti
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 6d: CTA STRUTTURATE
-# Trasforma CTA stringa in oggetto con primary/secondary/intent.
+# PATCH 4 — build_ai_summary (Sezione 6h) — SOSTITUISCE la versione attuale
+# Fix: punteggiatura corretta, struttura più densa di entità
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_structured_cta(cta_raw: str, section_type: str = "generic") -> dict:
@@ -637,6 +614,303 @@ def build_same_as(local_seo: dict, extra_socials: list = None) -> list:
     return same_as
 
 
+# Mappa @type Schema.org per categoria business (pertinenza dinamica)
+BUSINESS_TYPE_MAP = {
+    # Food & Beverage
+    "ristorante": "Restaurant", "bar": "BarOrPub", "pizzeria": "Restaurant",
+    "trattoria": "Restaurant", "olio": "FoodEstablishment", "vino": "Winery",
+    "cantina": "Winery", "frantoio": "FoodEstablishment", "pasticceria": "Bakery",
+    "gelateria": "IceCreamShop", "panetteria": "Bakery",
+    # Salute & Benessere
+    "medico": "MedicalBusiness", "dentista": "Dentist", "clinica": "MedicalClinic",
+    "farmacia": "Pharmacy", "veterinario": "VeterinaryCare",
+    "fisioterapia": "MedicalBusiness", "palestra": "SportsActivityLocation",
+    # Professionisti
+    "avvocato": "LegalService", "notaio": "LegalService",
+    "commercialista": "ProfessionalService", "architetto": "ProfessionalService",
+    "ingegnere": "ProfessionalService", "consulente": "ProfessionalService",
+    # Retail & E-commerce
+    "negozio": "Store", "boutique": "ClothingStore", "gioielleria": "JewelryStore",
+    "libreria": "BookStore", "ottica": "Store",
+    # Hospitality
+    "hotel": "LodgingBusiness", "albergo": "Hotel", "b&b": "BedAndBreakfast",
+    "agriturismo": "LodgingBusiness", "spa": "DaySpa",
+    # Servizi digitali / Tech
+    "agenzia": "ProfessionalService", "software": "SoftwareApplication",
+    "sviluppo": "ProfessionalService", "marketing": "ProfessionalService",
+    "web": "ProfessionalService",
+    # Istruzione
+    "scuola": "School", "università": "EducationalOrganization",
+    "accademia": "EducationalOrganization", "corso": "EducationalOrganization",
+    # Artigianato / Manifattura
+    "artigiano": "LocalBusiness", "manifattura": "LocalBusiness", "produzione": "LocalBusiness",
+}
+
+def infer_schema_type(servizi: str, contesto: str = "") -> str:
+    """
+    Inferisce il @type Schema.org più pertinente dal testo servizi/contesto.
+    Fallback sicuro su LocalBusiness se nessun match.
+    """
+    testo = (servizi + " " + contesto).lower()
+    for keyword, schema_type in BUSINESS_TYPE_MAP.items():
+        if keyword in testo:
+            return schema_type
+    return "LocalBusiness"
+
+def parse_address(indirizzo: str) -> dict:
+    """
+    Parsing robusto dell'indirizzo nel formato italiano:
+    'Via X, snc, Città, CAP, Provincia'
+    Gestisce varianti con o senza numero civico.
+    """
+    if not indirizzo:
+        return {}
+
+    parts = [p.strip() for p in indirizzo.split(",") if p.strip()]
+
+    # Rileva CAP (5 cifre)
+    cap = ""
+    cap_idx = -1
+    for i, p in enumerate(parts):
+        if re.match(r"^\d{5}$", p):
+            cap = p
+            cap_idx = i
+            break
+
+    # Struttura attesa: [Via, (civico?), Città, CAP, Provincia]
+    street = parts[0] if len(parts) > 0 else ""
+
+    # Se il secondo elemento è un numero civico tipo "snc", "12", ecc.
+    if len(parts) > 1 and re.match(r"^(snc|s\.n\.c\.|\d+[a-z]?)$", parts[1], re.IGNORECASE):
+        street = f"{parts[0]}, {parts[1]}"
+        city_idx = 2
+    else:
+        city_idx = 1
+
+    city = parts[city_idx] if len(parts) > city_idx else ""
+
+    # Provincia: elemento dopo il CAP
+    province = parts[cap_idx + 1] if cap_idx >= 0 and len(parts) > cap_idx + 1 else ""
+
+    return {
+        "@type": "PostalAddress",
+        "streetAddress": street,
+        "addressLocality": city,
+        "postalCode": cap,
+        "addressRegion": province,
+        "addressCountry": "IT",
+    }
+
+def build_opening_hours_spec(orari: dict) -> list:
+    """
+    Converte il dict orari (Lunedì→stringa) in OpeningHoursSpecification array.
+    Gestisce fasce orarie multiple (mattina + pomeriggio).
+    """
+    DAY_MAP = {
+        "Lunedì": "Monday", "Martedì": "Tuesday", "Mercoledì": "Wednesday",
+        "Giovedì": "Thursday", "Venerdì": "Friday",
+        "Sabato": "Saturday", "Domenica": "Sunday",
+    }
+
+    # Raggruppa giorni con stessa fascia oraria per compattare lo schema
+    fascia_to_days: dict = {}
+    for giorno, fascia in orari.items():
+        if not fascia:
+            continue
+        eng_day = DAY_MAP.get(giorno, giorno)
+        key = fascia.strip()
+        fascia_to_days.setdefault(key, []).append(eng_day)
+
+    specs = []
+    for fascia, days in fascia_to_days.items():
+        # Gestisce "09:00-13:00, 14:30-18:30" (fasce multiple nello stesso giorno)
+        sub_fasce = [f.strip() for f in fascia.split(",") if f.strip()]
+        for sf in sub_fasce:
+            match = re.match(r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})", sf)
+            if match:
+                specs.append({
+                    "@type": "OpeningHoursSpecification",
+                    "dayOfWeek": days,
+                    "opens": match.group(1),
+                    "closes": match.group(2),
+                })
+
+    return specs
+
+def build_schema_markup(
+    azienda: str,
+    local_seo: dict,
+    servizi: str,
+    fatti: str,
+    faq_data: list = None,
+    products: list = None,
+    awards: list = None,
+    same_as: list = None,
+    schema_type: str = None,
+) -> dict:
+    """
+    Genera schema_markup JSON-LD completo con @graph.
+    Nodi inclusi dinamicamente in base ai dati disponibili:
+    - LocalBusiness (sempre)
+    - Organization (sempre)
+    - Product[] (se products non vuoto)
+    - FAQPage (se faq_data non vuoto)
+
+    Pertinenza: @type inferito da servizi/contesto se non fornito esplicitamente.
+    """
+
+    # Normalizza URL
+    url_raw = local_seo.get("url", "").strip()
+    if url_raw and not url_raw.startswith("http"):
+        url_raw = f"https://www.{url_raw}"
+    base_id = url_raw or f"https://www.{azienda.lower().replace(' ', '')}.it"
+
+    # Inferisci tipo Schema.org
+    if not schema_type or schema_type == "LocalBusiness":
+        schema_type = infer_schema_type(servizi, fatti)
+
+    # Indirizzo
+    address = parse_address(local_seo.get("indirizzo", ""))
+
+    # Coordinate GPS
+    geo = {}
+    lat = local_seo.get("gps_lat", "").strip()
+    lon = local_seo.get("gps_lon", "").strip()
+    if lat and lon:
+        geo = {"@type": "GeoCoordinates", "latitude": lat, "longitude": lon}
+
+    # Orari strutturati
+    orari = local_seo.get("orari", {})
+    opening_hours_spec = build_opening_hours_spec(orari) if orari else []
+
+    # sameAs
+    same_as_list = same_as or []
+
+    # ── Nodo LocalBusiness ───────────────────────────────────────────────────
+    local_business = {
+        "@type": schema_type,
+        "@id": f"{base_id}#business",
+        "name": azienda,
+        "url": url_raw,
+        "telephone": local_seo.get("telefono", ""),
+        "address": address,
+    }
+    if geo:
+        local_business["geo"] = geo
+    if opening_hours_spec:
+        local_business["openingHoursSpecification"] = opening_hours_spec
+    if same_as_list:
+        local_business["sameAs"] = same_as_list
+
+    # ── Nodo Organization ────────────────────────────────────────────────────
+    organization = {
+        "@type": "Organization",
+        "@id": f"{base_id}#organization",
+        "name": azienda,
+        "url": url_raw,
+    }
+    if same_as_list:
+        organization["sameAs"] = same_as_list
+    if awards:
+        organization["award"] = awards
+
+    # Estrai knowsAbout dai servizi (topical authority per GEO)
+    servizi_list = [s.strip() for s in re.split(r"[,;\n·•\-]+", servizi) if s.strip()][:6]
+    if servizi_list:
+        organization["knowsAbout"] = servizi_list
+
+    # ── Nodo/i Product ───────────────────────────────────────────────────────
+    product_nodes = []
+    if products:
+        for i, prod in enumerate(products):
+            if not isinstance(prod, dict) or not prod.get("name"):
+                continue
+
+            node = {
+                "@type": "Product",
+                "@id": f"{base_id}#product-{i+1}",
+                "name": prod["name"],
+                "brand": {"@type": "Brand", "name": azienda},
+            }
+            if prod.get("description"):
+                node["description"] = prod["description"]
+            if prod.get("award"):
+                node["award"] = prod["award"]
+
+            # Struttura Review per premi con punteggio numerico
+            reviews = []
+            for review in prod.get("reviews", []):
+                r = {
+                    "@type": "Review",
+                    "author": {
+                        "@type": "Organization",
+                        "name": review.get("source", ""),
+                    },
+                }
+                if review.get("rating") and review.get("best_rating"):
+                    r["reviewRating"] = {
+                        "@type": "Rating",
+                        "ratingValue": str(review["rating"]),
+                        "bestRating": str(review["best_rating"]),
+                    }
+                if review.get("year"):
+                    r["datePublished"] = str(review["year"])
+                reviews.append(r)
+
+            if reviews:
+                node["review"] = reviews
+
+            # AggregateRating se c'è un solo voto principale (es. Flos Olei 99/100)
+            main_review = next((r for r in prod.get("reviews", []) if r.get("rating")), None)
+            if main_review:
+                node["aggregateRating"] = {
+                    "@type": "AggregateRating",
+                    "ratingValue": str(main_review["rating"]),
+                    "bestRating": str(main_review.get("best_rating", 100)),
+                    "reviewCount": str(len(reviews)) if reviews else "1",
+                }
+
+            product_nodes.append(node)
+
+    # ── Nodo FAQPage ─────────────────────────────────────────────────────────
+    faq_node = None
+    if faq_data:
+        main_entity = []
+        for faq in faq_data:
+            domanda = faq.get("domanda") or faq.get("name") or faq.get("question", "")
+            risposta = faq.get("risposta") or faq.get("answer") or faq.get("text", "")
+            if domanda and risposta:
+                main_entity.append({
+                    "@type": "Question",
+                    "name": domanda,
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": risposta[:500],  # Tronca a 500 char per schema ottimale
+                    },
+                })
+        if main_entity:
+            faq_node = {
+                "@type": "FAQPage",
+                "mainEntity": main_entity,
+            }
+
+    # ── Assembla @graph ───────────────────────────────────────────────────────
+    graph = [local_business, organization]
+    graph.extend(product_nodes)
+    if faq_node:
+        graph.append(faq_node)
+
+    return {
+        "@context": "https://schema.org",
+        "@graph": graph,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATCH 3 — build_entity_block (Sezione 6c) — SOSTITUISCE la versione attuale
+# Fix: parsing indirizzo corretto + campo awards strutturato
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 6h: AI SUMMARY BUILDER
 # Genera ai_summary sintetico dai dati input (senza chiamata AI aggiuntiva).
@@ -645,75 +919,81 @@ def build_same_as(local_seo: dict, extra_socials: list = None) -> list:
 def build_ai_summary(azienda: str, servizi: str, local_seo: dict, fatti: str) -> str:
     """
     Costruisce ai_summary lato Python (0 token aggiuntivi).
-    Formato: Chi è + Cosa fa + Dove opera.
-    Massimo 160 caratteri per compatibilità meta description.
+    Formato denso: Chi + Cosa + Dove + Differenziatore principale.
+    Max 200 caratteri, niente punteggiatura spezzata.
     """
-    city   = ""
-    indirizzo = local_seo.get("indirizzo","")
-    if indirizzo:
-        parts = [p.strip() for p in indirizzo.split(",") if p.strip()]
-        city  = parts[1] if len(parts) > 1 else parts[0] if parts else ""
+    # Città dall'indirizzo
+    addr = parse_address(local_seo.get("indirizzo", ""))
+    city = addr.get("addressLocality", "")
+    province = addr.get("addressRegion", "")
+    location_str = f"{city} ({province})" if city and province else city
 
     # Primo servizio come attività principale
     primo_servizio = servizi.split(",")[0].strip() if servizi else ""
 
-    # Primo fatto citabile come differenziatore
-    primo_fatto = fatti.split("·")[0].strip() if "·" in fatti else fatti.split("\n")[0].strip() if fatti else ""
-    primo_fatto = primo_fatto.strip('"').strip("'")
+    # Primo fatto citabile (prende la prima riga non vuota)
+    fatto_lines = [l.strip().strip("·•-\"'") for l in fatti.split("\n") if l.strip()]
+    primo_fatto = fatto_lines[0] if fatto_lines else ""
 
-    parts_summary = [azienda]
+    # Costruzione parti
+    parti = []
+    if azienda:
+        parti.append(azienda)
     if primo_servizio:
-        parts_summary.append(f"specializzata in {primo_servizio}")
-    if city:
-        parts_summary.append(f"con sede a {city}")
+        parti.append(f"specializzata in {primo_servizio}")
+    if location_str:
+        parti.append(f"con sede a {location_str}")
     if primo_fatto:
-        parts_summary.append(primo_fatto)
+        parti.append(primo_fatto)
 
-    summary = ". ".join(parts_summary) + "."
-    # Tronca a 160 char senza spezzare parole
-    if len(summary) > 160:
-        summary = summary[:157].rsplit(" ", 1)[0] + "..."
+    # Unisci con separatore pulito
+    summary = ", ".join(parti)
+    if summary and not summary.endswith("."):
+        summary += "."
+
+    # Tronca a 200 char senza spezzare parole
+    if len(summary) > 200:
+        summary = summary[:197].rsplit(" ", 1)[0].rstrip(",") + "..."
+
     return summary
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 6i: POST-PROCESS PIPELINE GLOBALE
-# Applica harden_facts, entities, ai_summary, sameAs, quality_score, html
-# all'intero output generato dalle sezioni AI.
+# PATCH 5 — post_process (Sezione 6i) — SOSTITUISCE la versione attuale
+# Aggiunge: generazione schema_markup completo, estrazione awards dai fatti,
+#           products dal JSON AI se presenti, page_meta per WordPress
 # ─────────────────────────────────────────────────────────────────────────────
 
 def post_process(
     generated: dict,
-    azienda:   str,
-    servizi:   str,
-    fatti:     str,
+    azienda: str,
+    servizi: str,
+    fatti: str,
     local_seo: dict,
-    verified_texts: list = None,   # FIX: testi completi (debrief+RAG+scraping), non URL
-    schema_type: str = "LocalBusiness"
+    verified_texts: list = None,
+    schema_type: str = "LocalBusiness",
 ) -> dict:
     """
-    Pipeline post-processing globale:
+    Pipeline post-processing globale v6+:
     1. Harden facts su home + pagina_servizio
-    2. Struttura CTA
-    3. Inietta entities block
-    4. Genera ai_summary
-    5. Aggiorna sameAs nello schema markup
-    6. Calcola quality_score
-    7. Genera HTML blocks
-    Modifica generated in-place, ritorna il dict arricchito.
+    2. CTA strutturate
+    3. Entities block (con parse indirizzo fix)
+    4. AI summary (fix punteggiatura)
+    5. Schema markup JSON-LD completo (@graph)
+    6. page_meta per WordPress
+    7. Quality score
+    8. HTML blocks
     """
-    # verified_data: testi reali da cui il Fact Hardener verifica i claim.
-    # Filtra None e stringhe vuote per evitare falsi negativi.
     verified_data = [t for t in (verified_texts or []) if t and t.strip()]
 
-    # 1. Fact hardening su sezioni testuali
+    # 1. Fact hardening
     if generated.get("home"):
         generated["home"] = harden_section(generated["home"], verified_data)
     if generated.get("pagina_servizio"):
         generated["pagina_servizio"] = harden_section(generated["pagina_servizio"], verified_data)
 
     # 2. CTA strutturate
-    for key, stype in [("home","home"), ("pagina_servizio","service")]:
+    for key, stype in [("home", "home"), ("pagina_servizio", "service")]:
         section = generated.get(key, {})
         if section and isinstance(section.get("cta"), str):
             section["cta"] = build_structured_cta(section["cta"], stype)
@@ -724,26 +1004,70 @@ def post_process(
     # 4. AI Summary
     generated["ai_summary"] = build_ai_summary(azienda, servizi, local_seo, fatti)
 
-    # 5. sameAs aggiornato nello schema
+    # 5. sameAs
     same_as = build_same_as(local_seo)
-    if same_as and generated.get("schema_markup",{}).get("organization"):
-        generated["schema_markup"]["organization"]["sameAs"] = same_as
 
-    # 6. Quality score
-    generated["quality_score"] = compute_quality_score(generated, local_seo, verified_data)  # verified_data = testi, non URL
+    # 5b. Estrai awards dai fatti (linee con pattern premio/riconoscimento)
+    award_patterns = [
+        r"\b(?:premio|premiato|vincitore|vince|medaglia|corona|stella|foglie?|gocce?|"
+        r"riconoscimento|award|best|first place|oro|argento|bronzo|"
+        r"flos olei|gambero rosso|bibenda|slow food|michelin|merum|"
+        r"maestro|azienda dell.anno)\b"
+    ]
+    awards_found = []
+    for line in fatti.split("\n"):
+        line = line.strip().strip("·•-")
+        if line and any(re.search(p, line, re.IGNORECASE) for p in award_patterns):
+            awards_found.append(line)
 
-    # 7. HTML blocks
+    # 5c. Prodotti dall'AI se presenti nel JSON generato
+    ai_products = generated.get("prodotti") or generated.get("products") or []
+
+    # 5d. FAQ per FAQPage schema
+    faq_data = generated.get("faq", [])
+
+    # 5e. Genera schema markup completo
+    generated["schema_markup"] = build_schema_markup(
+        azienda=azienda,
+        local_seo=local_seo,
+        servizi=servizi,
+        fatti=fatti,
+        faq_data=faq_data,
+        products=ai_products if ai_products else None,
+        awards=awards_found if awards_found else None,
+        same_as=same_as,
+        schema_type=schema_type,
+    )
+
+    # 6. page_meta per WordPress (slug, SEO meta, OG)
+    home = generated.get("home", {})
+    h1 = home.get("h1", azienda)
+    intro = home.get("intro", "")
+    meta_desc = intro[:155].rsplit(" ", 1)[0] + "..." if len(intro) > 155 else intro
+
+    url_raw = local_seo.get("url", "").strip()
+    if url_raw and not url_raw.startswith("http"):
+        url_raw = f"https://www.{url_raw}"
+
+    slug = re.sub(r"[^a-z0-9\-]", "", azienda.lower().replace(" ", "-"))
+
+    generated["page_meta"] = {
+        "slug": slug,
+        "meta_title": h1[:60] if h1 else azienda,
+        "meta_description": meta_desc,
+        "og_title": h1[:60] if h1 else azienda,
+        "og_description": meta_desc,
+        "canonical_url": url_raw or f"https://www.{slug}.it/",
+    }
+
+    # 7. Quality score
+    generated["quality_score"] = compute_quality_score(generated, local_seo, verified_data)
+
+    # 8. HTML blocks
     html_blocks = generate_html_blocks(generated)
     generated.update(html_blocks)
 
     return generated
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 7: SCRAPING DIRETTO URL (OBJ 3)
-# Tenta di leggere homepage + pagine /chi-siamo /about /premi /awards
-# I dati estratti sovrascrivono la conoscenza generica del modello.
-# ─────────────────────────────────────────────────────────────────────────────
 def scrape_website(url: str, timeout: int = 8) -> dict:
     """
     Scraping BeautifulSoup di homepage e pagine chiave.
