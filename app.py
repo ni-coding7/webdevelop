@@ -191,16 +191,16 @@ PRICING = {
         "gpt-4o":       {"input": 0.00250, "output": 0.01000},
     },
     "anthropic": {
-        "claude-3-5-haiku-20241022":  {"input": 0.00100, "output": 0.00500},
-        "claude-3-5-sonnet-20241022": {"input": 0.00300, "output": 0.01500},
-        "claude-3-opus-20240229":     {"input": 0.01500, "output": 0.07500},
+        "claude-haiku-4-5-20251001":  {"input": 0.00100, "output": 0.00500},
+        "claude-sonnet-4-6": {"input": 0.00300, "output": 0.01500},
+        "claude-opus-4-7":     {"input": 0.01500, "output": 0.07500},
     }
 }
 
 MODEL_LABELS = {
-    "claude-3-5-haiku-20241022":  "Claude 3.5 Haiku 💰 (Economico)",
-    "claude-3-5-sonnet-20241022": "Claude 3.5 Sonnet 🔋 (Raccomandato per GEO)",
-    "claude-3-opus-20240229":     "Claude 3 Opus 💎 (Massima qualità)",
+    "claude-haiku-4-5-20251001":  "Claude 4.5 Haiku 💰 (Economico)",
+    "claude-sonnet-4-6": "Claude 4.6 Sonnet 🔋 (Raccomandato per GEO)",
+    "claude-opus-4-7":     "Claude 4.7 Opus 💎 (Massima qualità)",
     "gpt-4o-mini":                "GPT-4o Mini 💰",
     "gpt-4o":                     "GPT-4o 🔋",
 }
@@ -208,17 +208,9 @@ MODEL_LABELS = {
 MODEL_MAX_TOKENS = {
     "gpt-4o-mini":                4096, 
     "gpt-4o":                     4096,
-    "claude-3-5-haiku-20241022":  8192, 
-    "claude-3-5-sonnet-20241022": 8192, 
-    "claude-3-opus-20240229":     4096,
-}
-
-MODEL_MAX_TOKENS = {
-    "gpt-4o-mini":              4096,
-    "gpt-4o":                   4096,
-    "claude-3-5-haiku-latest":  8192,
-    "claude-3-5-sonnet-latest": 8192,
-    "claude-3-opus-latest":     4096,
+    "claude-haiku-4-5-20251001":  8192, 
+    "claude-sonnet-4-6": 8192, 
+    "claude-sonnet-4-6":     4096,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
