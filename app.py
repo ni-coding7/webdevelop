@@ -872,9 +872,10 @@ def build_schema_markup(
             if not isinstance(prod, dict) or not prod.get("name"):
                 continue
 
+            prod_slug = _slugify_product(prod.get("name", f"product-{i+1}"))
             node = {
                 "@type": "Product",
-                "@id": f"{base_id}#product-{i+1}",
+                "@id": f"{base_id}#product-{prod_slug}",
                 "name": prod["name"],
                 "brand": {"@type": "Brand", "name": azienda},
             }
@@ -1359,53 +1360,130 @@ CATEGORY_PRICE_MAP = {
 }
 
 
+def _slugify_product(name: str) -> str:
+    """Genera uno slug URL-safe dal nome prodotto per usarlo come @id Schema."""
+    s = name.lower().strip()
+    s = re.sub(r"[àáâã]", "a", s)
+    s = re.sub(r"[èéêë]", "e", s)
+    s = re.sub(r"[ìíîï]", "i", s)
+    s = re.sub(r"[òóôõ]", "o", s)
+    s = re.sub(r"[ùúûü]", "u", s)
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    return s or "product"
+
+
+# Pattern che identificano SOLO premi/logo senza un prodotto reale associato
+_PURE_AWARD_PATTERNS = re.compile(
+    r"^\s*(?:logo|marchio|certificazione|premio|punteggio|flos olei|gambero rosso|"
+    r"bibenda|medaglia|award|riconoscimento|three leaves|due foglie|tre foglie|"
+    r"corona|stelle michelin)\b",
+    re.IGNORECASE,
+)
+
+# Termini che segnalano un nome commerciale valido (almeno uno deve essere presente)
+_PRODUCT_NAME_SIGNALS = re.compile(
+    r"\b(?:olio|riserva|affiorante|blend|monocultivar|cosme|infus|linea|"
+    r"collezione|vino|extravergine|evo|prodotto|referenza|etichetta|"
+    r"l['\u2019]affiorante|dop|igp|biologico|bio)\b",
+    re.IGNORECASE,
+)
+
+# Parole da rimuovere dal nome (suffissi di premio, anni, punteggi)
+_NAME_NOISE = re.compile(
+    r"\s*(?:–|-|—)\s*(?:premio|flos olei|gambero rosso|bibenda|punteggio|"
+    r"medaglia|award|20\d{2}|99[/\\]100|\d+[/\\]\d+).*$",
+    re.IGNORECASE,
+)
+
+
 def build_products_from_fatti(fatti: str, azienda: str = "") -> list:
     """
     Analizza i fatti citabili del debrief per costruire un array products strutturato.
-    Mappa name, description, award, category, priceRange.
-    Non inventa dati: se un campo non è inferibile rimane stringa vuota.
+    v8.1 — tre miglioramenti:
+      1. Nome pulito: estrae solo il nome commerciale, rimuove i suffissi di premio
+      2. Filtro anti-logo: scarta righe che descrivono solo un premio/logo senza prodotto
+      3. Mappa award separato dalla description: una riga può essere sia prodotto che award
     """
     if not fatti:
         return []
+
     products = []
     seen_names: set = set()
+
     lines = [
         l.strip().strip("·•-\"'—").strip()
         for l in re.split(r"[\n;]", fatti) if l.strip()
     ]
+
+    # Prima passata: raccoglie award da righe pure-award per associarli ai prodotti
+    # (es. "Flos Olei 2023 — 99/100 Coratina" va associato a "Coratina")
+    pending_awards: list = []
+    for line in lines:
+        if _PURE_AWARD_PATTERNS.search(line):
+            pending_awards.append(line.strip())
+
     for line in lines:
         line_lower = line.lower()
-        is_product = bool(re.search(
-            r"\b(?:olio|riserva|affiorante|blend|monocultivar|cosme|infus|linea|"
-            r"collezione|vino|extravergine|evo|prodotto|referenza|etichetta)\b",
-            line_lower
-        ))
+
+        # FILTRO 1: scarta righe che sono SOLO premi/loghi senza un prodotto
+        if _PURE_AWARD_PATTERNS.search(line):
+            continue  # è un award puro — non un prodotto
+
+        # FILTRO 2: la riga deve contenere almeno un segnale di prodotto reale
+        if not _PRODUCT_NAME_SIGNALS.search(line):
+            continue
+
         is_award = bool(re.search(
             r"\b(?:premio|premiato|flos olei|gambero rosso|bibenda|medaglia|"
             r"corona|stella|foglie?|award|riconoscimento|punteggio)\b",
             line_lower
         ))
-        if not is_product and not is_award:
-            continue
+
+        # Estrai nome commerciale: prendi la parte prima del separatore o dei due punti
         name_match = re.match(r"^([^(·\-–—:]+)", line)
         raw_name = name_match.group(1).strip() if name_match else line[:60]
+
+        # PULIZIA NOME: rimuove suffissi di premio/anno ("— Flos Olei 2023", ecc.)
+        raw_name = _NAME_NOISE.sub("", raw_name).strip()
+        # Rimuovi residui numerici isolati alla fine (es. "99/100")
+        raw_name = re.sub(r"\s*\d+[/\\]\d+\s*$", "", raw_name).strip()
+        # Title case
         prod_name = raw_name.title()
-        if not prod_name or prod_name in seen_names:
+
+        if not prod_name or len(prod_name) < 3 or prod_name in seen_names:
             continue
         seen_names.add(prod_name)
+
+        # Categoria e prezzo
         category = ""
         for cat_key in CATEGORY_PRICE_MAP:
             if cat_key in line_lower:
                 category = cat_key.title()
                 break
         price_range = CATEGORY_PRICE_MAP.get(category.lower(), "€€")
+
+        # Description: usa la riga completa se non è solo un award nella stessa riga
+        description = line if not is_award else ""
+
+        # Award: cerca tra i pending_awards uno che menzioni una keyword del nome prodotto
+        matched_award = ""
+        name_keywords = [w for w in prod_name.lower().split() if len(w) > 3]
+        for pa in pending_awards:
+            if any(kw in pa.lower() for kw in name_keywords):
+                matched_award = pa
+                break
+        if is_award and not matched_award:
+            matched_award = line  # la riga stessa contiene il premio
+
         products.append({
             "name":        prod_name,
-            "description": line if not is_award else "",
-            "award":       line if is_award else "",
+            "description": description,
+            "award":       matched_award,
             "category":    category,
             "priceRange":  price_range,
         })
+
     return products[:8]
 
 
