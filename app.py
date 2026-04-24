@@ -1,8 +1,46 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║     GEO Score™ Content Generator v6 — Alligator Edition                    ║
-║     Patch chirurgica anti-spazzatura + GEO-Flow copywriting                ║
+║     GEO Score™ Content Generator v8 — Alligator Edition                    ║
+║     Plug & Play Data Production · Geocoding · Products · Hybrid FAQ        ║
+║     Sentiment E-E-A-T · Internal Linking Silo Architecture                 ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
+
+CHANGELOG v8 (5 integrazioni Plug & Play su v7):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INT 1 — GEOCODIFICA AUTOMATICA (geopy)
+  • extract_contacts_from_scrape(): estrae telefono/email da footer e pagine
+    contatti via regex su HTML scraping già esistente
+  • geocode_address(): usa geopy Nominatim (user-agent: 'alligator_geo_tool')
+    per convertire indirizzo in lat/lon; popola gps_lat, gps_lon automaticamente
+  • GeoCoordinates iniettato nello schema markup se coordinate disponibili
+
+INT 2 — PRODUCT SCHEMA ARRAY & MARKET INTELLIGENCE
+  • build_products_from_fatti(): mappa prodotti dai fatti citabili del debrief
+    su name, description, award, category, priceRange
+  • ANNO_FONDAZIONE_OVERRIDE = 1817: rettifica storica iniettata nel ctx
+  • products[] popolato nel JSON finale e nel @graph Schema.org
+
+INT 3 — HYBRID MIX FAQ (SEO + GEO)
+  • Nuovo prompt_faq_hybrid(): risposta apre con affermazione diretta (Featured
+    Snippet), seguito da approfondimento denso di entità (date, premi, cultivar,
+    polifenoli) per motori generativi; prosa umana, zero bullet in risposta
+
+INT 4 — SENTIMENT & E-E-A-T ESTESO (Recensioni Real-Only)
+  • extract_sentiment_terms(): analizza testo scraping per termini sensoriali
+    positivi reali (no invenzioni); popola sentiment_keywords nel JSON
+  • enrich_meta_with_sentiment(): inietta keyword sensoriali in meta_description
+    e nelle descrizioni prodotti; se sito nuovo/no recensioni: campo vuoto
+
+INT 5 — INTERNAL LINKING MAP (Silo Architecture)
+  • build_internal_linking_map(): genera oggetto internal_linking_suggestions
+    con link logici tra pagine (Cosmesi → Qualità Olio, FAQ → Prodotti, ecc.)
+    per ottimizzare crawl budget e topical authority
+
+CHANGELOG v6-v7 (mantenuti):
+  • URL FILTER ANTI-SPAZZATURA (DENYLIST_DOMAINS + DENYLIST_URL_PATTERNS)
+  • GEO-FLOW COPYWRITING (prosa citabile, connettivi, no-telegrafico)
+  • PRICING 2026 aggiornato
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 CHANGELOG v6 (patch chirurgica sul v5 — 2 punti critici):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -54,6 +92,11 @@ import re
 import time
 from typing import Optional
 from urllib.parse import urljoin, urlparse
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COSTANTE STORICA v8 (INT 2 — Rettifica Storica)
+# ─────────────────────────────────────────────────────────────────────────────
+ANNO_FONDAZIONE_OVERRIDE = 1817  # Anno di fondazione/tradizione verificato
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 1: GEO CRITERIA CONSTANT
@@ -793,8 +836,11 @@ def build_schema_markup(
         "name": azienda,
         "url": url_raw,
         "telephone": local_seo.get("telefono", ""),
+        "email": local_seo.get("email", ""),
         "address": address,
     }
+    # Rimuovi campi vuoti dallo schema
+    local_business = {k: v for k, v in local_business.items() if v}
     if geo:
         local_business["geo"] = geo
     if opening_hours_spec:
@@ -836,6 +882,14 @@ def build_schema_markup(
                 node["description"] = prod["description"]
             if prod.get("award"):
                 node["award"] = prod["award"]
+            if prod.get("category"):
+                node["category"] = prod["category"]
+            if prod.get("priceRange"):
+                node["offers"] = {
+                    "@type": "Offer",
+                    "description": prod["priceRange"],
+                    "priceCurrency": "EUR",
+                }
 
             # Struttura Review per premi con punteggio numerico
             reviews = []
@@ -972,19 +1026,25 @@ def post_process(
     local_seo: dict,
     verified_texts: list = None,
     schema_type: str = "LocalBusiness",
+    scrape_data: dict = None,
 ) -> dict:
     """
-    Pipeline post-processing globale v6+:
-    1. Harden facts su home + pagina_servizio
-    2. CTA strutturate
-    3. Entities block (con parse indirizzo fix)
-    4. AI summary (fix punteggiatura)
-    5. Schema markup JSON-LD completo (@graph)
-    6. page_meta per WordPress
-    7. Quality score
-    8. HTML blocks
+    Pipeline post-processing globale v8:
+    1.  Harden facts su home + pagina_servizio
+    2.  CTA strutturate
+    3.  Entities block
+    4.  AI summary
+    5.  sameAs + awards
+    6.  products[] dal debrief (INT 2)
+    7.  Schema markup JSON-LD completo
+    8.  page_meta per WordPress
+    9.  Sentiment E-E-A-T enrichment (INT 4)
+    10. Internal Linking Map (INT 5)
+    11. Quality score
+    12. HTML blocks
     """
     verified_data = [t for t in (verified_texts or []) if t and t.strip()]
+    _scrape = scrape_data or {}
 
     # 1. Fact hardening
     if generated.get("home"):
@@ -1007,7 +1067,7 @@ def post_process(
     # 5. sameAs
     same_as = build_same_as(local_seo)
 
-    # 5b. Estrai awards dai fatti (linee con pattern premio/riconoscimento)
+    # 5b. Awards dai fatti
     award_patterns = [
         r"\b(?:premio|premiato|vincitore|vince|medaglia|corona|stella|foglie?|gocce?|"
         r"riconoscimento|award|best|first place|oro|argento|bronzo|"
@@ -1020,13 +1080,19 @@ def post_process(
         if line and any(re.search(p, line, re.IGNORECASE) for p in award_patterns):
             awards_found.append(line)
 
-    # 5c. Prodotti dall'AI se presenti nel JSON generato
-    ai_products = generated.get("prodotti") or generated.get("products") or []
+    # 6. Products dal debrief (INT 2)
+    ai_products = (
+        generated.get("prodotti")
+        or generated.get("products")
+        or build_products_from_fatti(fatti, azienda)
+    )
+    if ai_products:
+        generated["products"] = ai_products
 
-    # 5d. FAQ per FAQPage schema
+    # 7. FAQ per FAQPage schema
     faq_data = generated.get("faq", [])
 
-    # 5e. Genera schema markup completo
+    # 7b. Schema markup completo
     generated["schema_markup"] = build_schema_markup(
         azienda=azienda,
         local_seo=local_seo,
@@ -1039,31 +1105,48 @@ def post_process(
         schema_type=schema_type,
     )
 
-    # 6. page_meta per WordPress (slug, SEO meta, OG)
+    # 8. page_meta
     home = generated.get("home", {})
     h1 = home.get("h1", azienda)
     intro = home.get("intro", "")
     meta_desc = intro[:155].rsplit(" ", 1)[0] + "..." if len(intro) > 155 else intro
-
     url_raw = local_seo.get("url", "").strip()
     if url_raw and not url_raw.startswith("http"):
         url_raw = f"https://www.{url_raw}"
-
     slug = re.sub(r"[^a-z0-9\-]", "", azienda.lower().replace(" ", "-"))
-
     generated["page_meta"] = {
-        "slug": slug,
-        "meta_title": h1[:60] if h1 else azienda,
+        "slug":             slug,
+        "meta_title":       h1[:60] if h1 else azienda,
         "meta_description": meta_desc,
-        "og_title": h1[:60] if h1 else azienda,
-        "og_description": meta_desc,
-        "canonical_url": url_raw or f"https://www.{slug}.it/",
+        "og_title":         h1[:60] if h1 else azienda,
+        "og_description":   meta_desc,
+        "canonical_url":    url_raw or f"https://www.{slug}.it/",
     }
 
-    # 7. Quality score
+    # 9. Sentiment E-E-A-T enrichment (INT 4)
+    sentiment_terms = extract_sentiment_terms(_scrape)
+    generated["sentiment_keywords"] = sentiment_terms  # vuoto se no recensioni reali
+    if sentiment_terms:
+        generated["page_meta"] = enrich_meta_with_sentiment(generated["page_meta"], sentiment_terms)
+        # Arricchisci anche descrizioni prodotti se presenti
+        for prod in generated.get("products", []):
+            if prod.get("description") and not prod.get("sentiment_enriched"):
+                prod["description"] += " " + ", ".join(sentiment_terms[:3])
+                prod["sentiment_enriched"] = True
+
+    # 10. Internal Linking Map (INT 5)
+    linking = build_internal_linking_map(
+        servizi=servizi,
+        generated=generated,
+        azienda=azienda,
+        base_url=url_raw,
+    )
+    generated.update(linking)
+
+    # 11. Quality score
     generated["quality_score"] = compute_quality_score(generated, local_seo, verified_data)
 
-    # 8. HTML blocks
+    # 12. HTML blocks
     html_blocks = generate_html_blocks(generated)
     generated.update(html_blocks)
 
@@ -1136,6 +1219,286 @@ def scrape_website(url: str, timeout: int = 8) -> dict:
             continue
 
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 7b: CONTACT EXTRACTION (INT 1 — v8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def extract_contacts_from_scrape(scrape_data: dict) -> dict:
+    """
+    Analizza i testi estratti dallo scraping per rilevare telefono ed email.
+    Cerca prioritariamente in testi di pagine /contatti, footer, homepage.
+    Ritorna dict {telefono, email} — campi vuoti se non trovati.
+    """
+    contacts = {"telefono": "", "email": ""}
+    phone_pattern = re.compile(
+        r"(?:\+39[\s\-]?)?(?:0\d{1,4}[\s\-]?\d{4,8}|\d{3}[\s\-]?\d{3,4}[\s\-]?\d{4})"
+    )
+    email_pattern = re.compile(
+        r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
+    )
+    for item in scrape_data.get("testi", []):
+        text = item.get("testo", "")
+        url  = item.get("url", "").lower()
+        priority = ("contatt" in url or "contact" in url)
+        if not contacts["telefono"]:
+            for p in phone_pattern.findall(text):
+                if len(re.sub(r"\D", "", p)) >= 8:
+                    contacts["telefono"] = p.strip()
+                    break
+        if not contacts["email"]:
+            exclude = ("noreply", "no-reply", "donotreply", "example", "test@")
+            for e in email_pattern.findall(text):
+                if not any(ex in e.lower() for ex in exclude):
+                    contacts["email"] = e.strip()
+                    break
+        if priority and contacts["telefono"] and contacts["email"]:
+            break
+    return contacts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 7c: GEOCODIFICA AUTOMATICA (INT 1 — v8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def geocode_address(indirizzo: str) -> dict:
+    """
+    Usa geopy Nominatim per convertire l'indirizzo in lat/lon.
+    user-agent: 'alligator_geo_tool'.
+    Ritorna {gps_lat, gps_lon} come stringhe, o {} se non trovato/errore.
+    Richiede: pip install geopy
+    """
+    if not indirizzo or not indirizzo.strip():
+        return {}
+    try:
+        from geopy.geocoders import Nominatim
+        geolocator = Nominatim(user_agent="alligator_geo_tool")
+        location = geolocator.geocode(indirizzo, timeout=10, country_codes="it")
+        if location:
+            return {
+                "gps_lat": str(round(location.latitude,  6)),
+                "gps_lon": str(round(location.longitude, 6)),
+            }
+    except Exception:
+        pass
+    return {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 7d: SENTIMENT & E-E-A-T ESTESO (INT 4 — v8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SENSORY_SEED = [
+    "profumo", "aroma", "fragranza", "bouquet", "sentore", "fruttato",
+    "erbaceo", "floreale", "mandorlato", "carciofo", "pomodoro",
+    "amaro", "piccante", "piccantezza", "retrogusto", "persistenza",
+    "rotondo", "equilibrato", "elegante", "morbido", "vellutato",
+    "sapido", "fresco", "vivace", "intenso", "delicato", "fine",
+    "strutturato", "complesso", "armonico", "color oro", "dorato",
+    "verde intenso", "limpido", "brillante",
+    "polifenoli", "tocoferoli", "acidità", "perossidi", "cultivar",
+    "coratina", "ogliarola", "frantoio", "moraiolo", "leccino",
+    "nocellara", "cerasuola",
+]
+
+REVIEW_SECTION_PATTERNS = [
+    r"(?:recensione|review|commento|feedback|valutazione|opinione|giudizio)",
+    r"(?:ha scritto|ha lasciato|cliente dice|utente dice)",
+    r"(?:tripadvisor|google review|trustpilot)",
+    r"(?:stelle|stars|★|☆|⭐)",
+]
+
+
+def extract_sentiment_terms(scrape_data: dict) -> list:
+    """
+    Estrae termini sensoriali positivi REALI da recensioni nel testo scraping.
+    VINCOLO: ritorna [] se non ci sono segnali di recensioni reali (no invenzioni).
+    """
+    all_text = " ".join(item.get("testo", "") for item in scrape_data.get("testi", []))
+    if not all_text.strip():
+        return []
+    has_reviews = any(re.search(p, all_text, re.IGNORECASE) for p in REVIEW_SECTION_PATTERNS)
+    if not has_reviews:
+        return []
+    found = []
+    text_lower = all_text.lower()
+    neg_signals = ("non ", "senza ", "poco ", "scarso", "negativo", "cattivo")
+    for term in SENSORY_SEED:
+        if term.lower() in text_lower:
+            idx = text_lower.find(term.lower())
+            context = text_lower[max(0, idx-40): idx+len(term)+40]
+            if not any(neg in context for neg in neg_signals):
+                found.append(term)
+    return list(dict.fromkeys(found))[:10]
+
+
+def enrich_meta_with_sentiment(page_meta: dict, sentiment_terms: list) -> dict:
+    """Inietta keyword sensoriali nel meta_description se disponibili (no invenzioni)."""
+    if not sentiment_terms or not page_meta:
+        return page_meta
+    enriched = dict(page_meta)
+    terms_str = ", ".join(sentiment_terms[:5])
+    meta_desc = enriched.get("meta_description", "")
+    if meta_desc and len(meta_desc) + len(terms_str) + 3 <= 160:
+        enriched["meta_description"] = f"{meta_desc.rstrip('.')} — {terms_str}."
+    else:
+        enriched["sentiment_keywords_meta"] = terms_str
+    return enriched
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 7e: PRODUCT SCHEMA ARRAY (INT 2 — v8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+CATEGORY_PRICE_MAP = {
+    "dop": "Premium", "igp": "€€€", "biologico": "€€€", "bio": "€€€",
+    "extravergine": "€€", "gourmet": "Premium", "riserva": "Premium",
+    "affiorante": "Premium", "monocultivar": "€€€", "cosmetico": "€€",
+    "cosmesi": "€€", "infuso": "€€",
+}
+
+
+def build_products_from_fatti(fatti: str, azienda: str = "") -> list:
+    """
+    Analizza i fatti citabili del debrief per costruire un array products strutturato.
+    Mappa name, description, award, category, priceRange.
+    Non inventa dati: se un campo non è inferibile rimane stringa vuota.
+    """
+    if not fatti:
+        return []
+    products = []
+    seen_names: set = set()
+    lines = [
+        l.strip().strip("·•-\"'—").strip()
+        for l in re.split(r"[\n;]", fatti) if l.strip()
+    ]
+    for line in lines:
+        line_lower = line.lower()
+        is_product = bool(re.search(
+            r"\b(?:olio|riserva|affiorante|blend|monocultivar|cosme|infus|linea|"
+            r"collezione|vino|extravergine|evo|prodotto|referenza|etichetta)\b",
+            line_lower
+        ))
+        is_award = bool(re.search(
+            r"\b(?:premio|premiato|flos olei|gambero rosso|bibenda|medaglia|"
+            r"corona|stella|foglie?|award|riconoscimento|punteggio)\b",
+            line_lower
+        ))
+        if not is_product and not is_award:
+            continue
+        name_match = re.match(r"^([^(·\-–—:]+)", line)
+        raw_name = name_match.group(1).strip() if name_match else line[:60]
+        prod_name = raw_name.title()
+        if not prod_name or prod_name in seen_names:
+            continue
+        seen_names.add(prod_name)
+        category = ""
+        for cat_key in CATEGORY_PRICE_MAP:
+            if cat_key in line_lower:
+                category = cat_key.title()
+                break
+        price_range = CATEGORY_PRICE_MAP.get(category.lower(), "€€")
+        products.append({
+            "name":        prod_name,
+            "description": line if not is_award else "",
+            "award":       line if is_award else "",
+            "category":    category,
+            "priceRange":  price_range,
+        })
+    return products[:8]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 7f: INTERNAL LINKING MAP (INT 5 — v8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SILO_LINK_RULES = [
+    ("cosmesi",       "qualità olio",   "Cosmesi → 'Qualità dell'Olio' come ingrediente base"),
+    ("prodotti",      "come produrre",  "Prodotti → processo produttivo"),
+    ("qualità",       "certificazioni", "Qualità → certificazioni DOP/IGP"),
+    ("certificazioni","prodotti",       "Certificazioni → linea prodotti certificati"),
+    ("storia",        "prodotti",       "Storia → prodotti che rappresentano la tradizione"),
+    ("faq",           "prodotti",       "FAQ → prodotti per rispondere 'dove comprare'"),
+    ("faq",           "contatti",       "FAQ → contatti per rispondere 'come ordinare'"),
+    ("homepage",      "prodotti",       "Homepage → pagina prodotti principale"),
+    ("homepage",      "storia",         "Homepage → chi siamo / storia"),
+    ("homepage",      "faq",            "Homepage → FAQ per ridurre il bounce rate"),
+    ("servizi",       "case study",     "Servizi → case study per aumentare trust"),
+    ("servizi",       "blog",           "Servizi → articoli tematici correlati"),
+    ("blog",          "servizi",        "Articoli blog → pagina servizi pertinente"),
+    ("chi siamo",     "servizi",        "Chi siamo → servizi offerti"),
+    ("premi",         "prodotti",       "Premi → prodotti premiati"),
+]
+
+
+def build_internal_linking_map(
+    servizi: str,
+    generated: dict,
+    azienda: str = "",
+    base_url: str = "",
+) -> dict:
+    """
+    Genera internal_linking_suggestions basato su silo architecture.
+    Ritorna dict con suggerimenti strutturati per URL sorgente.
+    """
+    suggestions: dict = {}
+    servizi_lower = (servizi or "").lower()
+    base = (base_url or "https://www.sito.it").rstrip("/")
+
+    page_map = {
+        "homepage":      base + "/",
+        "storia":        base + "/chi-siamo/",
+        "qualità olio":  base + "/qualita/",
+        "certificazioni":base + "/certificazioni/",
+        "cosmesi":       base + "/cosmesi/",
+        "premi":         base + "/premi-riconoscimenti/",
+        "contatti":      base + "/contatti/",
+        "blog":          base + "/blog/",
+    }
+    if generated.get("pagina_servizio"):
+        page_map["servizi"]  = base + "/servizi/"
+    if generated.get("faq"):
+        page_map["faq"]      = base + "/faq/"
+    if generated.get("prodotti") or generated.get("products"):
+        page_map["prodotti"] = base + "/prodotti/"
+
+    for source_topic, target_topic, rationale in SILO_LINK_RULES:
+        source_relevant = (source_topic in servizi_lower or source_topic in page_map)
+        target_url = page_map.get(target_topic, "")
+        if not (source_relevant and target_url):
+            continue
+        source_url = page_map.get(source_topic, base + f"/{source_topic.replace(' ','-')}/")
+        if source_url not in suggestions:
+            suggestions[source_url] = []
+        suggestions[source_url].append({
+            "target_url":  target_url,
+            "anchor_text": target_topic.title(),
+            "rationale":   rationale,
+            "priority":    "high" if source_topic in ("homepage", "faq", "prodotti") else "medium",
+        })
+
+    # Link canonici homepage → sezioni generate
+    home_links = []
+    for pk, pu in page_map.items():
+        if pu != base + "/" and pk not in ("storia","qualità olio","certificazioni","cosmesi","premi","contatti","blog"):
+            home_links.append({
+                "target_url":  pu,
+                "anchor_text": pk.replace("-"," ").title(),
+                "rationale":   f"Homepage → {pk} (struttura silo base)",
+                "priority":    "high",
+            })
+    if home_links:
+        suggestions[base + "/"] = home_links
+
+    return {
+        "internal_linking_suggestions": suggestions,
+        "_silo_note": (
+            "Suggerimenti generati da regole di silo architecture Alligator v8. "
+            "Priorità 'high' = link fondamentale per crawl budget e topical authority. "
+            "Verifica che le URL target esistano prima dell'implementazione."
+        ),
+    }
 
 
 def format_scrape_for_prompt(scrape_data: dict) -> str:
@@ -1622,7 +1985,9 @@ def build_ctx(
     rag_evidence: str = "",
     scrape_content: str = "",
     geo_entities: list = None,
-    source_urls: list = None
+    source_urls: list = None,
+    contacts: dict = None,
+    products: list = None,
 ) -> str:
     addr = local_seo.get("indirizzo", "")
 
@@ -1640,6 +2005,26 @@ che aumentano l'autorità e la citabilità AI. Non inventare entità non in list
 URL FONTI DISPONIBILI (per campo fonti_utilizzate):
 {chr(10).join(f"  {u}" for u in source_urls)}"""
 
+    # Blocco contatti estratti dallo scraping (INT 1)
+    contacts_block = ""
+    if contacts:
+        tel  = contacts.get("telefono", "")
+        mail = contacts.get("email", "")
+        if tel or mail:
+            contacts_block = f"\nCONTATTI RILEVATI DAL SITO: telefono={tel or 'n/d'}, email={mail or 'n/d'}"
+
+    # Blocco prodotti (INT 2)
+    products_block = ""
+    if products:
+        prod_lines = [
+            f"  • {p['name']} | cat: {p.get('category','?')} | prezzo: {p.get('priceRange','?')} | {p.get('award','') or p.get('description','')}"
+            for p in products
+        ]
+        products_block = "\nPRODOTTI RILEVATI DAL DEBRIEF:\n" + "\n".join(prod_lines)
+
+    # Anno fondazione (INT 2 — Rettifica Storica)
+    anno_block = f"\nANNO DI FONDAZIONE/TRADIZIONE VERIFICATO: {ANNO_FONDAZIONE_OVERRIDE}"
+
     # Il RAG e lo scraping vengono PRIMA del debrief (Livello 1 > Livello 2)
     return f"""{rag_evidence}
 
@@ -1651,7 +2036,7 @@ SERVIZI: {servizi}
 TARGET: {target}
 FATTI CITABILI: {fatti}
 INDIRIZZO: {addr if addr else "Non specificato"}
-LINGUA OUTPUT: {lingua}
+LINGUA OUTPUT: {lingua}{anno_block}{contacts_block}{products_block}
 {geo_block}
 {sources_block}"""
 
@@ -1768,7 +2153,50 @@ di PROSA FLUIDA, non elenchi):
 }}"""
 
 
-def prompt_schema(ctx: str, azienda: str, local_seo: dict, faq_data: list) -> str:
+def prompt_faq_hybrid(ctx: str) -> str:
+    """
+    INT 3 — Hybrid Mix FAQ: SEO (Featured Snippet) + GEO (motori generativi).
+    Struttura risposta: affermazione diretta → approfondimento denso di entità.
+    Tono: umano, autorevole, scorrevole. Niente bullet nelle risposte.
+    """
+    return f"""{ctx}
+
+Genera SOLO il blocco "faq" con 5 domande usando la logica HYBRID MIX FAQ:
+
+STRUTTURA OBBLIGATORIA DI OGNI RISPOSTA:
+  PARTE 1 — AFFERMAZIONE DIRETTA (Featured Snippet):
+    La prima frase risponde in modo diretto e autonomo alla domanda.
+    Deve essere leggibile isolata dal contesto, come uno snippet di Google.
+    Esempio: "L'Olio Riserva DOP è prodotto dalla cultivar Coratina
+    raccolta a mano nell'areale fascia olivata Assisi-Spoleto."
+
+  PARTE 2 — APPROFONDIMENTO ENTITÀ (GEO):
+    I paragrafi successivi intessono entità correlate: date storiche (es. 1817),
+    premi con anno, denominazioni DOP/IGP, termini tecnici (polifenoli, cultivar,
+    acidità, perossidi), nomi di guide (Flos Olei, Gambero Rosso).
+    Il tono è narrativo e umano — nessun elenco puntato nella risposta.
+    Ogni frase porta valore aggiunto per chi legge, non solo per il motore.
+
+VINCOLO CRITICO: dati numerici (anni, premi, punteggi) solo se nelle fonti RAG/debrief.
+In assenza di dato: flow discorsivo SENZA inventare soglie o quantità.
+
+Rispondi ESCLUSIVAMENTE con questo JSON (5 coppie Q&A, risposte 100-150 parole di PROSA):
+{{
+  "faq": [
+    {{
+      "domanda": "Query naturale reale (Come/Cosa/Quanto/Perché/Chi/Dove/Qual è)",
+      "risposta": "Frase diretta di risposta immediata (Featured Snippet). Seguono 2-3 periodi densi di entità correlate: denominazioni ufficiali, termini tecnici, date, premi con fonte se disponibile. Prosa fluida, nessun elenco.",
+      "fonte": "URL_reale_o_stringa_vuota"
+    }},
+    {{"domanda": "Q2", "risposta": "100-150 parole prosa ibrida SEO+GEO", "fonte": ""}},
+    {{"domanda": "Q3", "risposta": "100-150 parole prosa ibrida SEO+GEO", "fonte": ""}},
+    {{"domanda": "Q4", "risposta": "100-150 parole prosa ibrida SEO+GEO", "fonte": ""}},
+    {{"domanda": "Q5", "risposta": "100-150 parole prosa ibrida SEO+GEO", "fonte": ""}}
+  ]
+}}"""
+
+
+
     indirizzo = local_seo.get("indirizzo", "")
     url_sito  = local_seo.get("url", "https://www.esempio.it")
     linkedin  = local_seo.get("linkedin", "")
@@ -2116,7 +2544,7 @@ def faq_to_md(faqs):
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
-        page_title="GEO Score™ v5 — Alligator Advanced GEO",
+        page_title="GEO Score™ v8 — Alligator Plug & Play",
         page_icon="🐊",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -2151,8 +2579,8 @@ def main():
 
     st.markdown("""
     <div class="geo-header">
-        <h1>🐊 GEO Score™ Content Generator v5 — Advanced GEO Edition</h1>
-        <p>Deep RAG · URL Scraping · GEO-Entity · Fact Hardening · Entity System · Quality Score · HTML Blocks · AI Summary · Framework GEO Score™ by Nico Fioretti</p>
+        <h1>🐊 GEO Score™ Content Generator v8 — Plug &amp; Play Edition</h1>
+        <p>Geocodifica GPS · Contatti Auto · Product Schema · Hybrid FAQ · Sentiment E-E-A-T · Internal Linking Silo · Framework GEO Score™ by Nico Fioretti</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -2272,6 +2700,14 @@ def main():
                                       placeholder="41.2232")
             gps_lon  = st.text_input("Longitudine GPS (opz.)", key="gps_lon",
                                       placeholder="16.2934")
+            telefono_manuale = st.text_input(
+                "📞 Telefono (auto-rilevato o manuale)", key="telefono_manuale",
+                placeholder="0883 123456  ← lascia vuoto per auto-rilevamento"
+            )
+            email_manuale = st.text_input(
+                "✉️ Email (auto-rilevata o manuale)", key="email_manuale",
+                placeholder="info@azienda.it  ← lascia vuoto per auto-rilevamento"
+            )
 
         # GRIGLIA ORARI — formato unico stringa "09:00-13:00, 15:00-19:00"
         st.markdown("**🕐 Orari di Apertura** *(lascia vuoto = chiuso · es: 09:00-13:00, 15:00-19:00)*")
@@ -2299,6 +2735,8 @@ def main():
 
         local_seo = {
             "indirizzo": indirizzo_completo,
+            "telefono":  st.session_state.get("telefono_manuale",""),
+            "email":     st.session_state.get("email_manuale",""),
             "gps_lat":   st.session_state.get("gps_lat",""),
             "gps_lon":   st.session_state.get("gps_lon",""),
             "orari":     orari_dict,
@@ -2365,8 +2803,9 @@ def main():
             st.markdown("""
             <div class="rag-box">
             📦 <b>Dipendenze richieste:</b><br>
-            <code>pip install duckduckgo-search beautifulsoup4</code><br>
-            Il RAG viene eseguito UNA VOLTA prima della generazione e iniettato in ogni prompt.
+            <code>pip install duckduckgo-search beautifulsoup4 geopy</code><br>
+            Il RAG viene eseguito UNA VOLTA prima della generazione e iniettato in ogni prompt.<br>
+            <code>geopy</code> è richiesta per la geocodifica automatica GPS (INT 1).
             </div>
             """, unsafe_allow_html=True)
 
@@ -2417,23 +2856,50 @@ def main():
             generated = dict(st.session_state.get("generated", {}))
             call_log  = []
 
-            # ── FASE 0: RAG & SCRAPING ────────────────────────────────
-            rag_evidence_str  = ""
+            # ── FASE 0: RAG, SCRAPING, GEOCODIFICA, CONTATTI (v8) ────
+            rag_evidence_str   = ""
             scrape_content_str = ""
-            all_source_urls   = []
-            geo_entities      = get_geo_entities(f"{_az} {_ft} {_loc.get('indirizzo','')}")
+            all_source_urls    = []
+            scrape_data_raw    = {}
+            contacts_extracted = {}
+            geo_entities       = get_geo_entities(f"{_az} {_ft} {_loc.get('indirizzo','')}")
+            _loc_enriched      = dict(_loc)
 
             if enable_scraping and _loc.get("url","").startswith("http"):
                 with st.spinner("🕷️ Scraping sito web in corso..."):
-                    scrape_data = scrape_website(_loc["url"])
-                    scrape_content_str = format_scrape_for_prompt(scrape_data)
-                    all_source_urls.extend(scrape_data.get("url_visitati",[]))
-                    if scrape_data.get("errori"):
-                        st.warning("⚠️ Scraping parziale: " + "; ".join(scrape_data["errori"][:2]))
+                    scrape_data_raw = scrape_website(_loc["url"])
+                    scrape_content_str = format_scrape_for_prompt(scrape_data_raw)
+                    all_source_urls.extend(scrape_data_raw.get("url_visitati",[]))
+                    if scrape_data_raw.get("errori"):
+                        st.warning("⚠️ Scraping parziale: " + "; ".join(scrape_data_raw["errori"][:2]))
                     elif scrape_content_str:
-                        st.success(f"✅ Scraping: {len(scrape_data['testi'])} pagine lette")
+                        st.success(f"✅ Scraping: {len(scrape_data_raw['testi'])} pagine lette")
                     else:
                         st.info("ℹ️ Scraping: nessun contenuto significativo estratto")
+
+                # INT 1 — Estrazione contatti
+                contacts_extracted = extract_contacts_from_scrape(scrape_data_raw)
+                if contacts_extracted.get("telefono") or contacts_extracted.get("email"):
+                    st.success(f"📞 Contatti rilevati: tel={contacts_extracted.get('telefono','—')} · email={contacts_extracted.get('email','—')}")
+                if contacts_extracted.get("telefono") and not _loc_enriched.get("telefono","").strip():
+                    _loc_enriched["telefono"] = contacts_extracted["telefono"]
+                if contacts_extracted.get("email") and not _loc_enriched.get("email","").strip():
+                    _loc_enriched["email"] = contacts_extracted["email"]
+
+            # INT 1 — Geocodifica automatica (solo se coordinate non già inserite)
+            if not _loc_enriched.get("gps_lat","").strip() and _loc_enriched.get("indirizzo","").strip():
+                with st.spinner("🌍 Geocodifica indirizzo in corso (geopy)..."):
+                    geo_coords = geocode_address(_loc_enriched["indirizzo"])
+                    if geo_coords:
+                        _loc_enriched.update(geo_coords)
+                        st.success(f"📍 Coordinate GPS: {geo_coords['gps_lat']}, {geo_coords['gps_lon']}")
+                    else:
+                        st.info("ℹ️ Geocodifica non disponibile — installa geopy o inserisci coordinate manualmente.")
+
+            # INT 2 — Products dal debrief
+            products_debrief = build_products_from_fatti(_ft, _az)
+            if products_debrief:
+                st.info(f"🛒 {len(products_debrief)} prodotti rilevati dal debrief → Product Schema attivo")
 
             if enable_rag and _az:
                 with st.spinner("🌐 Ricerca web multi-query in corso (3 query)..."):
@@ -2454,11 +2920,13 @@ def main():
 
             # ── FASE 1: GENERAZIONE SEZIONI ───────────────────────────
             ctx = build_ctx(
-                _az, _sv, _tg, _ft, _loc, _ln,
+                _az, _sv, _tg, _ft, _loc_enriched, _ln,
                 rag_evidence=rag_evidence_str,
                 scrape_content=scrape_content_str,
                 geo_entities=geo_entities,
-                source_urls=all_source_urls
+                source_urls=all_source_urls,
+                contacts=contacts_extracted,
+                products=products_debrief,
             )
 
             sections = []
@@ -2478,10 +2946,11 @@ def main():
                     elif section == "servizio":
                         user_p = prompt_servizio(ctx)
                     elif section == "faq":
-                        user_p = prompt_faq(ctx)
+                        # INT 3 — Hybrid FAQ (SEO Featured Snippet + GEO entities)
+                        user_p = prompt_faq_hybrid(ctx)
                     else:
                         faq_data = generated.get("faq", [])
-                        user_p   = prompt_schema(ctx, _az, _loc, faq_data)
+                        user_p   = prompt_schema(ctx, _az, _loc_enriched, faq_data)
 
                     raw, in_t, out_t = call_api(provider, api_key, model, sys_p, user_p)
 
@@ -2510,34 +2979,46 @@ def main():
             # ── Aggiungi metadati anti-hallucination al JSON ──────────
             if generated:
                 generated["_meta_fonti"] = {
-                    "fonti_rag":     all_source_urls,
-                    "geo_entities":  geo_entities,
-                    "rag_attivo":    enable_rag,
+                    "fonti_rag":       all_source_urls,
+                    "geo_entities":    geo_entities,
+                    "rag_attivo":      enable_rag,
                     "scraping_attivo": enable_scraping,
-                    "url_scraping":  _loc.get("url","")
+                    "url_scraping":    _loc.get("url",""),
+                    "contacts":        contacts_extracted,
+                    "anno_fondazione": ANNO_FONDAZIONE_OVERRIDE,
                 }
 
-            # ── POST-PROCESS PIPELINE v5 ───────────────────────────────
-            # Applica: fact hardening, CTA strutturate, entities, ai_summary,
-            # sameAs automatico, quality_score, HTML blocks
+            # ── POST-PROCESS PIPELINE v8 ───────────────────────────────
             if generated:
-                with st.spinner("🔧 Post-processing: harden facts, quality score, HTML blocks..."):
-                    schema_type_pp = "LocalBusiness" if _loc.get("indirizzo","").strip() else "Organization"
+                with st.spinner("🔧 Post-processing v8: facts · products · sentiment · linking map..."):
+                    schema_type_pp = "LocalBusiness" if _loc_enriched.get("indirizzo","").strip() else "Organization"
                     generated = post_process(
                         generated      = generated,
                         azienda        = _az,
                         servizi        = _sv,
                         fatti          = _ft,
-                        local_seo      = _loc,
-                        verified_texts = [_ft, rag_evidence_str, scrape_content_str],  # FIX: testi reali
-                        schema_type    = schema_type_pp
+                        local_seo      = _loc_enriched,
+                        verified_texts = [_ft, rag_evidence_str, scrape_content_str],
+                        schema_type    = schema_type_pp,
+                        scrape_data    = scrape_data_raw,
                     )
+                    # Feedback sentiment
+                    st_terms = generated.get("sentiment_keywords", [])
+                    if st_terms:
+                        st.success(f"🎯 Sentiment E-E-A-T: {len(st_terms)} keyword sensoriali reali iniettate")
+                    else:
+                        st.info("ℹ️ Sentiment: nessuna recensione reale rilevata — campo omesso (no invenzioni)")
+                    # Feedback linking
+                    links = generated.get("internal_linking_suggestions", {})
+                    if links:
+                        st.success(f"🔗 Internal Linking Map: {sum(len(v) for v in links.values())} suggerimenti generati")
 
             progress.progress(100, text="✅ Generazione completata!")
 
-            st.session_state["generated"]  = generated
-            st.session_state["in_tokens"]  = total_in
-            st.session_state["out_tokens"] = total_out
+            st.session_state["generated"]         = generated
+            st.session_state["in_tokens"]          = total_in
+            st.session_state["out_tokens"]         = total_out
+            st.session_state["local_seo_enriched"] = _loc_enriched
             real_tot = estimate_cost(total_in, total_out, provider, model)
             st.session_state["real_cost"]  = real_tot
 
@@ -2554,7 +3035,7 @@ def main():
     # TAB 3: RISULTATI
     # ═══════════════════════════════════════════════════════════════════════
     with tab3:
-        st.subheader("📄 Risultati — Anti-Hallucination v5 · GEO Advanced")
+        st.subheader("📄 Risultati — Anti-Hallucination v8 · GEO Plug & Play")
 
         if not st.session_state.get("generated"):
             st.info("🔄 Vai al tab **🛠️ Generatore** per creare i contenuti.")
@@ -2599,6 +3080,29 @@ def main():
             with st.expander("🏷️ Entity Block (GEO)"):
                 st.json(entities)
 
+        # INT 4 — Sentiment Keywords
+        sentiment_kw = data.get("sentiment_keywords", [])
+        if sentiment_kw:
+            with st.expander(f"🎯 Sentiment Keywords E-E-A-T ({len(sentiment_kw)} termini sensoriali reali)"):
+                st.markdown("*Estratti da testi reali di scraping — iniettati in meta e descrizioni prodotto*")
+                st.markdown(" · ".join(f"`{k}`" for k in sentiment_kw))
+
+        # INT 5 — Internal Linking Map
+        ils = data.get("internal_linking_suggestions", {})
+        if ils:
+            total_links = sum(len(v) for v in ils.values()) if isinstance(ils, dict) else 0
+            with st.expander(f"🔗 Internal Linking Map — Silo Architecture ({total_links} suggerimenti)"):
+                st.caption(data.get("_silo_note",""))
+                if isinstance(ils, dict):
+                    for source_url, link_list in ils.items():
+                        st.markdown(f"**Da:** `{source_url}`")
+                        for lnk in link_list:
+                            priority_icon = "🔴" if lnk.get("priority") == "high" else "🟡"
+                            st.markdown(
+                                f"  {priority_icon} → [{lnk.get('anchor_text','')}]({lnk.get('target_url','')}) "
+                                f"— *{lnk.get('rationale','')}*"
+                            )
+
         # Mostra fonti aggregate se disponibili
         meta = data.get("_meta_fonti", {})
         if meta.get("fonti_rag"):
@@ -2617,6 +3121,7 @@ def main():
         if data.get("home"):            avail.append(("🏠 Homepage","home"))
         if data.get("pagina_servizio"): avail.append(("📄 Servizio","servizio"))
         if data.get("faq"):             avail.append(("❓ FAQ","faq"))
+        if data.get("products"):        avail.append(("🛒 Prodotti","prodotti"))
         if data.get("schema_markup") or data.get("faq"): avail.append(("🔗 Schema","schema"))
 
         if not avail:
@@ -2670,9 +3175,23 @@ def main():
                     if data.get("faq_html"):
                         copy_box("📋 Copia FAQ (HTML WordPress <details>)", data["faq_html"], "cp_faq_html")
 
+                elif key == "prodotti":
+                    # INT 2 — Products array display
+                    prods = data.get("products", [])
+                    st.caption(f"🛒 {len(prods)} prodotti rilevati · Anno fondazione/tradizione: **{ANNO_FONDAZIONE_OVERRIDE}**")
+                    for prod in prods:
+                        with st.expander(f"📦 {prod.get('name','Prodotto')} [{prod.get('category','')}] — {prod.get('priceRange','')}"):
+                            if prod.get("description"):
+                                st.markdown(f"**Descrizione:** {prod['description']}")
+                            if prod.get("award"):
+                                st.markdown(f"🏆 **Award:** {prod['award']}")
+                    prod_json = json.dumps(prods, ensure_ascii=False, indent=2)
+                    copy_box("📋 Copia Products Array (JSON)", prod_json, "cp_products")
+
                 elif key == "schema":
-                    schema_json = build_final_schema(data, _loc, _az)
-                    stype = "LocalBusiness 📍" if _loc.get("indirizzo","").strip() else "Organization 🌐"
+                    _loc_display = st.session_state.get("local_seo_enriched", _loc)
+                    schema_json = build_final_schema(data, _loc_display, _az)
+                    stype = "LocalBusiness 📍" if _loc_display.get("indirizzo","").strip() else "Organization 🌐"
                     st.caption(f"Schema: **{stype}** · Usa plugin WordPress 'Insert Headers and Footers'")
                     script_block = f'<script type="application/ld+json">\n{schema_json}\n</script>'
                     st.code(script_block, language="html")
