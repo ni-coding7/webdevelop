@@ -2921,7 +2921,7 @@ def main():
             st.info(f"📊 **{n_sel} chiamate AI** + **{extra_calls} fase RAG** · Costo totale stimato: **${tot_est:.5f}**")
 
         gen_btn = st.button(
-            f"🚀 Genera {n_sel} sezione{'i' if n_sel!=1 else ''}",
+            f"🚀 Genera {n_sel} {'sezione' if n_sel==1 else 'sezioni'}",
             disabled=(not ready or n_sel==0),
             type="primary"
         )
