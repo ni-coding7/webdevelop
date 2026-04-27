@@ -1,7 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║     GEO Score™ Content Generator v8 — Alligator Edition                    ║
-║     Plug & Play Data Production · Geocoding · Products · Hybrid FAQ        ║
+║     GEO Score™ Content Generator v9 — Alligator Edition                    ║
+║     Fix: Anno Fondazione per Cliente · Lingua Output · Model Default       ║
 ║     Sentiment E-E-A-T · Internal Linking Silo Architecture                 ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -40,6 +40,23 @@ CHANGELOG v6-v7 (mantenuti):
   • URL FILTER ANTI-SPAZZATURA (DENYLIST_DOMAINS + DENYLIST_URL_PATTERNS)
   • GEO-FLOW COPYWRITING (prosa citabile, connettivi, no-telegrafico)
   • PRICING 2026 aggiornato
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+CHANGELOG v9 — FIX CRITICI:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FIX 1 — ANNO FONDAZIONE PER CLIENTE (CRITICO — rimosso hardcoded 1817)
+  • ANNO_FONDAZIONE_OVERRIDE costante globale eliminata
+  • Nuovo campo "Anno di Fondazione" nel debrief Tab 1 (per-cliente)
+  • Se vuoto: nessun anno citato — zero contaminazione tra clienti
+
+FIX 2 — LINGUA OUTPUT ENFORCED
+  • prompt_home/servizio/faq_hybrid ora accettano parametro lingua
+  • Iniettato vincolo esplicito "LINGUA OUTPUT OBBLIGATORIA: {LINGUA}"
+  • Pipeline passa lingua=_ln a tutti i prompt
+
+FIX 3 — DEFAULT MODEL CORRETTO
+  • Sidebar: default cambiato da "claude-3-5-sonnet-latest" a "claude-sonnet-4-6"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 CHANGELOG v6 (patch chirurgica sul v5 — 2 punti critici):
@@ -93,10 +110,7 @@ import time
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
-# ─────────────────────────────────────────────────────────────────────────────
-# COSTANTE STORICA v8 (INT 2 — Rettifica Storica)
-# ─────────────────────────────────────────────────────────────────────────────
-ANNO_FONDAZIONE_OVERRIDE = 1817  # Anno di fondazione/tradizione verificato
+# ANNO_FONDAZIONE_OVERRIDE rimosso in v9 — campo per-cliente nel debrief
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 1: GEO CRITERIA CONSTANT
@@ -2101,7 +2115,8 @@ URL FONTI DISPONIBILI (per campo fonti_utilizzate):
         products_block = "\nPRODOTTI RILEVATI DAL DEBRIEF:\n" + "\n".join(prod_lines)
 
     # Anno fondazione (INT 2 — Rettifica Storica)
-    anno_block = f"\nANNO DI FONDAZIONE/TRADIZIONE VERIFICATO: {ANNO_FONDAZIONE_OVERRIDE}"
+    _anno = local_seo.get("anno_fondazione", "").strip()
+    anno_block = f"\nANNO DI FONDAZIONE: {_anno}" if _anno else ""
 
     # Il RAG e lo scraping vengono PRIMA del debrief (Livello 1 > Livello 2)
     return f"""{rag_evidence}
@@ -2122,10 +2137,11 @@ LINGUA OUTPUT: {lingua}{anno_block}{contacts_block}{products_block}
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 11: PROMPT MODULARI con descrittori prosa fluida (v6)
 # ─────────────────────────────────────────────────────────────────────────────
-def prompt_home(ctx: str) -> str:
+def prompt_home(ctx: str, lingua: str = "italiano") -> str:
+    lingua_block = f"LINGUA OUTPUT OBBLIGATORIA: {lingua.upper()}. Ogni campo del JSON in {lingua}.\n\n"
     return f"""{ctx}
 
-Genera SOLO il blocco "home". Ogni campo di prosa (intro, body) deve essere
+{lingua_block}Genera SOLO il blocco "home". Ogni campo di prosa (intro, body) deve essere
 UN TESTO NARRATIVO CONTINUATIVO, non un elenco di frasi nominali.
 
 ESEMPIO DEL FORMATO ATTESO PER IL CAMPO "intro" (replica lo stile):
@@ -2155,10 +2171,11 @@ prosa fluida, zero frasi-elenco):
 }}"""
 
 
-def prompt_servizio(ctx: str) -> str:
+def prompt_servizio(ctx: str, lingua: str = "italiano") -> str:
+    lingua_block = f"LINGUA OUTPUT OBBLIGATORIA: {lingua.upper()}. Ogni campo del JSON in {lingua}.\n\n"
     return f"""{ctx}
 
-Genera SOLO il blocco "pagina_servizio". L'intro deve essere prosa fluida;
+{lingua_block}Genera SOLO il blocco "pagina_servizio". L'intro deve essere prosa fluida;
 SOLO i campi "steps" e "lista" possono contenere elementi brevi stile elenco.
 
 ESEMPIO DEL FORMATO ATTESO PER IL CAMPO "intro":
@@ -2231,15 +2248,16 @@ di PROSA FLUIDA, non elenchi):
 }}"""
 
 
-def prompt_faq_hybrid(ctx: str) -> str:
+def prompt_faq_hybrid(ctx: str, lingua: str = "italiano") -> str:
     """
     INT 3 — Hybrid Mix FAQ: SEO (Featured Snippet) + GEO (motori generativi).
     Struttura risposta: affermazione diretta → approfondimento denso di entità.
     Tono: umano, autorevole, scorrevole. Niente bullet nelle risposte.
     """
+    lingua_block2 = f"LINGUA OUTPUT OBBLIGATORIA: {lingua.upper()}. Domande E risposte in {lingua}.\n\n"
     return f"""{ctx}
 
-Genera SOLO il blocco "faq" con 5 domande usando la logica HYBRID MIX FAQ:
+{lingua_block2}Genera SOLO il blocco "faq" con 5 domande usando la logica HYBRID MIX FAQ:
 
 STRUTTURA OBBLIGATORIA DI OGNI RISPOSTA:
   PARTE 1 — AFFERMAZIONE DIRETTA (Featured Snippet):
@@ -2778,6 +2796,11 @@ def main():
                                       placeholder="41.2232")
             gps_lon  = st.text_input("Longitudine GPS (opz.)", key="gps_lon",
                                       placeholder="16.2934")
+            anno_fond = st.text_input(
+                "Anno di Fondazione (opz.)",
+                key="anno_fondazione",
+                placeholder="es. 1995  \u2190 lascia vuoto se non vuoi citarlo"
+            )
             telefono_manuale = st.text_input(
                 "📞 Telefono (auto-rilevato o manuale)", key="telefono_manuale",
                 placeholder="0883 123456  ← lascia vuoto per auto-rilevamento"
@@ -2819,7 +2842,8 @@ def main():
             "gps_lon":   st.session_state.get("gps_lon",""),
             "orari":     orari_dict,
             "url":       st.session_state.get("url_sito",""),
-            "linkedin":  st.session_state.get("linkedin",""),
+            "linkedin":        st.session_state.get("linkedin",""),
+            "anno_fondazione": st.session_state.get("anno_fondazione",""),
         }
         st.session_state["local_seo"] = local_seo
 
@@ -2921,7 +2945,7 @@ def main():
             st.info(f"📊 **{n_sel} chiamate AI** + **{extra_calls} fase RAG** · Costo totale stimato: **${tot_est:.5f}**")
 
         gen_btn = st.button(
-            f"🚀 Genera {n_sel} {'sezione' if n_sel==1 else 'sezioni'}",
+            f"🚀 Genera {n_sel} sezione{'i' if n_sel!=1 else ''}",
             disabled=(not ready or n_sel==0),
             type="primary"
         )
@@ -3020,12 +3044,12 @@ def main():
 
                 try:
                     if section == "home":
-                        user_p = prompt_home(ctx)
+                        user_p = prompt_home(ctx, lingua=_ln)
                     elif section == "servizio":
-                        user_p = prompt_servizio(ctx)
+                        user_p = prompt_servizio(ctx, lingua=_ln)
                     elif section == "faq":
                         # INT 3 — Hybrid FAQ (SEO Featured Snippet + GEO entities)
-                        user_p = prompt_faq_hybrid(ctx)
+                        user_p = prompt_faq_hybrid(ctx, lingua=_ln)
                     else:
                         faq_data = generated.get("faq", [])
                         user_p   = prompt_schema(ctx, _az, _loc_enriched, faq_data)
@@ -3063,7 +3087,7 @@ def main():
                     "scraping_attivo": enable_scraping,
                     "url_scraping":    _loc.get("url",""),
                     "contacts":        contacts_extracted,
-                    "anno_fondazione": ANNO_FONDAZIONE_OVERRIDE,
+                    "anno_fondazione": _loc_enriched.get("anno_fondazione",""),
                 }
 
             # ── POST-PROCESS PIPELINE v8 ───────────────────────────────
@@ -3256,7 +3280,9 @@ def main():
                 elif key == "prodotti":
                     # INT 2 — Products array display
                     prods = data.get("products", [])
-                    st.caption(f"🛒 {len(prods)} prodotti rilevati · Anno fondazione/tradizione: **{ANNO_FONDAZIONE_OVERRIDE}**")
+                    _anno_disp = st.session_state.get("anno_fondazione","")
+                    anno_lbl = f" · Fondazione: **{_anno_disp}**" if _anno_disp else ""
+                    st.caption(f"🛒 {len(prods)} prodotti rilevati{anno_lbl}")
                     for prod in prods:
                         with st.expander(f"📦 {prod.get('name','Prodotto')} [{prod.get('category','')}] — {prod.get('priceRange','')}"):
                             if prod.get("description"):
