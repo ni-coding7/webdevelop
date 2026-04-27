@@ -2673,7 +2673,7 @@ def main():
             opts, dflt = list(PRICING["openai"].keys()), "gpt-4o-mini"
         else:
             # Default: Sonnet 3.5 — best trade-off GEO quality / costo
-            opts, dflt = list(PRICING["anthropic"].keys()), "claude-3-5-sonnet-latest"
+            opts, dflt = list(PRICING["anthropic"].keys()), "claude-sonnet-4-6"
 
         model = st.selectbox("Modello", opts,
                              index=opts.index(dflt) if dflt in opts else 0,
