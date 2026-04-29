@@ -1042,6 +1042,7 @@ def post_process(
     verified_texts: list = None,
     schema_type: str = "LocalBusiness",
     scrape_data: dict = None,
+    lingua: str = "italiano",
 ) -> dict:
     """
     Pipeline post-processing globale v8:
@@ -1155,6 +1156,7 @@ def post_process(
         generated=generated,
         azienda=azienda,
         base_url=url_raw,
+        lingua=lingua,
     )
     generated.update(linking)
 
@@ -1529,11 +1531,38 @@ def build_internal_linking_map(
     generated: dict,
     azienda: str = "",
     base_url: str = "",
+    lingua: str = "italiano",
 ) -> dict:
     """
     Genera internal_linking_suggestions basato su silo architecture.
     Ritorna dict con suggerimenti strutturati per URL sorgente.
     """
+    # Traduzioni anchor text per lingua output
+    ANCHOR_TRANSLATIONS = {
+        "spagnolo": {
+            "homepage": "Inicio", "storia": "Historia", "qualità olio": "Calidad del Aceite",
+            "certificazioni": "Certificaciones", "cosmesi": "Cosmética", "premi": "Premios",
+            "contatti": "Contacto", "blog": "Blog", "servizi": "Servicios",
+            "faq": "Preguntas Frecuentes", "prodotti": "Productos",
+        },
+        "inglese": {
+            "homepage": "Home", "storia": "Our Story", "qualità olio": "Oil Quality",
+            "certificazioni": "Certifications", "cosmesi": "Cosmetics", "premi": "Awards",
+            "contatti": "Contact", "blog": "Blog", "servizi": "Services",
+            "faq": "FAQ", "prodotti": "Products",
+        },
+        "francese": {
+            "homepage": "Accueil", "storia": "Notre Histoire", "qualità olio": "Qualité de l'Huile",
+            "certificazioni": "Certifications", "cosmesi": "Cosmétique", "premi": "Récompenses",
+            "contatti": "Contact", "blog": "Blog", "servizi": "Services",
+            "faq": "FAQ", "prodotti": "Produits",
+        },
+    }
+    anchor_map = ANCHOR_TRANSLATIONS.get(lingua.lower(), {})
+
+    def get_anchor(topic: str) -> str:
+        return anchor_map.get(topic, topic.title())
+
     suggestions: dict = {}
     servizi_lower = (servizi or "").lower()
     base = (base_url or "https://www.sito.it").rstrip("/")
@@ -1565,7 +1594,7 @@ def build_internal_linking_map(
             suggestions[source_url] = []
         suggestions[source_url].append({
             "target_url":  target_url,
-            "anchor_text": target_topic.title(),
+            "anchor_text": get_anchor(target_topic),
             "rationale":   rationale,
             "priority":    "high" if source_topic in ("homepage", "faq", "prodotti") else "medium",
         })
@@ -1576,7 +1605,7 @@ def build_internal_linking_map(
         if pu != base + "/" and pk not in ("storia","qualità olio","certificazioni","cosmesi","premi","contatti","blog"):
             home_links.append({
                 "target_url":  pu,
-                "anchor_text": pk.replace("-"," ").title(),
+                "anchor_text": get_anchor(pk),
                 "rationale":   f"Homepage → {pk} (struttura silo base)",
                 "priority":    "high",
             })
@@ -1970,7 +1999,13 @@ SENZA quantificare.
 """
 
 
-def build_system_prompt(stile_esempi: str = "") -> str:
+def build_system_prompt(stile_esempi: str = "", lingua: str = "italiano") -> str:
+    lingua_upper = lingua.upper()
+    lang_constraint = f"""⚠️ CRITICAL — OUTPUT LANGUAGE: {lingua_upper}
+ALL JSON field values (h1, intro, body, domanda, risposta, cta, steps, lista, description, etc.)
+MUST be written in {lingua_upper}. This rule is ABSOLUTE and overrides every other instruction.
+Do NOT use Italian unless the output language is explicitly Italian.\n\n"""
+
     alligator_rules = """APPROCCIO ALLIGATOR (OBBLIGATORIO):
 - DIRETTO ma MAI TELEGRAFICO: frasi complete con soggetto-verbo-complemento.
 - RISULTATI MISURABILI: ogni affermazione ha conseguenza concreta per il cliente.
@@ -2041,7 +2076,7 @@ ISTRUZIONE STILE: Analizza i testi sopra. Identifica lunghezza media frasi, voca
 ║   → NON usare numeri inventati o approssimativi              ║
 ╚══════════════════════════════════════════════════════════════╝"""
 
-    return f"""Sei il copywriter GEO/SEO senior di Alligator. Generi contenuti web ad alta citabilità AI.
+    return f"""{lang_constraint}Sei il copywriter GEO/SEO senior di Alligator. Generi contenuti web ad alta citabilità AI.
 
 {alligator_rules}
 {style_section}
@@ -2293,6 +2328,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON (5 coppie Q&A, risposte 100-150 parole d
 
 
 
+def prompt_schema(ctx: str, azienda: str, local_seo: dict, faq_data: list = None) -> str:
     indirizzo = local_seo.get("indirizzo", "")
     url_sito  = local_seo.get("url", "https://www.esempio.it")
     linkedin  = local_seo.get("linkedin", "")
@@ -2640,7 +2676,7 @@ def faq_to_md(faqs):
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
-        page_title="GEO Score™ v8 — Alligator Plug & Play",
+        page_title="GEO Score™ v10 — Alligator Edition",
         page_icon="🐊",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -2675,7 +2711,7 @@ def main():
 
     st.markdown("""
     <div class="geo-header">
-        <h1>🐊 GEO Score™ Content Generator v8 — Plug &amp; Play Edition</h1>
+        <h1>🐊 GEO Score™ Content Generator v10 — Alligator Edition</h1>
         <p>Geocodifica GPS · Contatti Auto · Product Schema · Hybrid FAQ · Sentiment E-E-A-T · Internal Linking Silo · Framework GEO Score™ by Nico Fioretti</p>
     </div>
     """, unsafe_allow_html=True)
@@ -2713,7 +2749,7 @@ def main():
 
         st.divider()
         st.subheader("💰 Stima Costi")
-        sys_tok = estimate_tokens(build_system_prompt())
+        sys_tok = estimate_tokens(build_system_prompt(lingua=st.session_state.get("lingua","italiano")))
         in_est  = sys_tok + 800   # contesto più grande con RAG
         out_est = 1200
         cpp     = estimate_cost(in_est, out_est, provider, model)
@@ -2938,20 +2974,20 @@ def main():
         st.divider()
 
         if ready and n_sel > 0:
-            sp_preview = build_system_prompt(_st)
+            sp_preview = build_system_prompt(_st, lingua=_ln)
             in_est_r   = estimate_tokens(sp_preview) + 800
             tot_est    = estimate_cost(in_est_r, 1200, provider, model) * n_sel
             extra_calls = (1 if enable_rag else 0)
             st.info(f"📊 **{n_sel} chiamate AI** + **{extra_calls} fase RAG** · Costo totale stimato: **${tot_est:.5f}**")
 
         gen_btn = st.button(
-            f"🚀 Genera {n_sel} sezione{'i' if n_sel!=1 else ''}",
+            f"🚀 Genera {n_sel} {'sezione' if n_sel==1 else 'sezioni'}",
             disabled=(not ready or n_sel==0),
             type="primary"
         )
 
         if gen_btn and ready and n_sel > 0:
-            sys_p = build_system_prompt(_st)
+            sys_p = build_system_prompt(_st, lingua=_ln)
 
             total_in  = 0
             total_out = 0
@@ -3103,6 +3139,7 @@ def main():
                         verified_texts = [_ft, rag_evidence_str, scrape_content_str],
                         schema_type    = schema_type_pp,
                         scrape_data    = scrape_data_raw,
+                        lingua         = _ln,
                     )
                     # Feedback sentiment
                     st_terms = generated.get("sentiment_keywords", [])
