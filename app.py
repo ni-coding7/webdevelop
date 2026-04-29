@@ -1,8 +1,8 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║     GEO Score™ Content Generator v9 — Alligator Edition                    ║
-║     Fix: Anno Fondazione per Cliente · Lingua Output · Model Default       ║
-║     Sentiment E-E-A-T · Internal Linking Silo Architecture                 ║
+║     GEO Score™ Content Generator v10 — Alligator Edition                   ║
+║     The Authority Orchestrator: Strict Multilang · Anti-Fuffa E-E-A-T      ║
+║     Geocodifica Resiliente · Silo v10 · Product Schema · P.IVA · SocialHub ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 CHANGELOG v8 (5 integrazioni Plug & Play su v7):
@@ -265,6 +265,7 @@ MODEL_LABELS = {
 MODEL_MAX_TOKENS = {
     "gpt-4o-mini":               4096,
     "gpt-4o":                    4096,
+    # v10 — tutti i modelli Anthropic a 8192 (mai troncati nemmeno nei moduli complessi)
     "claude-haiku-4-5-20251001": 8192,
     "claude-sonnet-4-6":         8192,
     "claude-opus-4-7":           8192,
@@ -646,6 +647,56 @@ def _esc(text: str) -> str:
 # Costruisce lista sameAs da tutti i dati disponibili.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def extract_vat_id(scrape_data: dict) -> str:
+    """
+    v10 — Estrae la Partita IVA italiana (formato IT + 11 cifre) dai testi di scraping.
+    Regex: P.IVA / Partita IVA / VAT IT + 11 cifre.
+    Ritorna stringa "IT12345678901" o "" se non trovata.
+    """
+    vat_pattern = re.compile(
+        r"(?:P\.?\s*IVA|Partita\s+IVA|C\.?\s*F\.?\s*e\s*P\.?\s*IVA|VAT\s+IT)\s*:?\s*"
+        r"(IT\s*)?(\d[\s.\-]?\d[\s.\-]?\d[\s.\-]?\d[\s.\-]?\d[\s.\-]?\d[\s.\-]?\d[\s.\-]?\d[\s.\-]?\d[\s.\-]?\d[\s.\-]?\d)",
+        re.IGNORECASE
+    )
+    for item in scrape_data.get("testi", []):
+        text = item.get("testo", "")
+        match = vat_pattern.search(text)
+        if match:
+            prefix = "IT" if not (match.group(1) or "").strip() else ""
+            digits = re.sub(r"[\s.\-]", "", match.group(2))
+            if len(digits) == 11:
+                return f"{prefix}{digits}".upper()
+    return ""
+
+
+def extract_social_urls(scrape_data: dict) -> list:
+    """
+    v10 — Social Hub: estrae tutti i profili social rilevati nei testi di scraping.
+    Costruisce il grafo di identità completo per sameAs.
+    Piattaforme supportate: Facebook, Instagram, LinkedIn, Twitter/X, YouTube, TikTok,
+    Pinterest, WhatsApp Business, Telegram.
+    """
+    social_patterns = [
+        ("facebook",  re.compile(r"https?://(?:www\.)?facebook\.com/[a-zA-Z0-9._\-/]+")),
+        ("instagram", re.compile(r"https?://(?:www\.)?instagram\.com/[a-zA-Z0-9._\-/]+")),
+        ("linkedin",  re.compile(r"https?://(?:www\.)?linkedin\.com/(?:company|in)/[a-zA-Z0-9._\-/]+")),
+        ("twitter",   re.compile(r"https?://(?:www\.)?(?:twitter|x)\.com/[a-zA-Z0-9._\-/]+")),
+        ("youtube",   re.compile(r"https?://(?:www\.)?youtube\.com/(?:@|channel/|c/)[a-zA-Z0-9._\-/]+")),
+        ("tiktok",    re.compile(r"https?://(?:www\.)?tiktok\.com/@[a-zA-Z0-9._\-/]+")),
+        ("pinterest", re.compile(r"https?://(?:www\.)?pinterest\.(?:it|com)/[a-zA-Z0-9._\-/]+")),
+    ]
+    found = []
+    seen: set = set()
+    all_text = " ".join(item.get("testo", "") for item in scrape_data.get("testi", []))
+    for _platform, pattern in social_patterns:
+        for match in pattern.finditer(all_text):
+            url = match.group(0).rstrip("/.,)")
+            if url not in seen:
+                seen.add(url)
+                found.append(url)
+    return found
+
+
 def build_same_as(local_seo: dict, extra_socials: list = None) -> list:
     """
     Aggiunge automaticamente:
@@ -873,6 +924,10 @@ def build_schema_markup(
         organization["sameAs"] = same_as_list
     if awards:
         organization["award"] = awards
+    # v10 — vatID: iniettato se disponibile
+    vat_id = local_seo.get("vat_id", "").strip()
+    if vat_id:
+        organization["vatID"] = vat_id
 
     # Estrai knowsAbout dai servizi (topical authority per GEO)
     servizi_list = [s.strip() for s in re.split(r"[,;\n·•\-]+", servizi) if s.strip()][:6]
@@ -1080,8 +1135,15 @@ def post_process(
     # 4. AI Summary
     generated["ai_summary"] = build_ai_summary(azienda, servizi, local_seo, fatti)
 
-    # 5. sameAs
-    same_as = build_same_as(local_seo)
+    # 5. sameAs + P.IVA + Social Hub (v10)
+    # Estrai P.IVA dai testi di scraping e iniettala nel local_seo
+    vat_id = extract_vat_id(_scrape)
+    if vat_id and not local_seo.get("vat_id", "").strip():
+        local_seo["vat_id"] = vat_id
+
+    # Estrai social URLs per costruire grafo identità completo
+    scraped_socials = extract_social_urls(_scrape)
+    same_as = build_same_as(local_seo, extra_socials=scraped_socials)
 
     # 5b. Awards dai fatti
     award_patterns = [
@@ -1096,12 +1158,15 @@ def post_process(
         if line and any(re.search(p, line, re.IGNORECASE) for p in award_patterns):
             awards_found.append(line)
 
-    # 6. Products dal debrief (INT 2)
+    # 6. Products dal debrief (INT 2) + servizi come Commercial Entity (v10)
     ai_products = (
         generated.get("prodotti")
         or generated.get("products")
         or build_products_from_fatti(fatti, azienda)
     )
+    # v10: se non ci sono prodotti da fatti (es. agenzia), usa i servizi come prodotti
+    if not ai_products and servizi:
+        ai_products = build_service_products(servizi, azienda)
     if ai_products:
         generated["products"] = ai_products
 
@@ -1139,8 +1204,8 @@ def post_process(
         "canonical_url":    url_raw or f"https://www.{slug}.it/",
     }
 
-    # 9. Sentiment E-E-A-T enrichment (INT 4)
-    sentiment_terms = extract_sentiment_terms(_scrape)
+    # 9. Sentiment E-E-A-T enrichment v10 (sector-aware, anti-fuffa)
+    sentiment_terms = extract_sentiment_terms(_scrape, servizi=servizi)
     generated["sentiment_keywords"] = sentiment_terms  # vuoto se no recensioni reali
     if sentiment_terms:
         generated["page_meta"] = enrich_meta_with_sentiment(generated["page_meta"], sentiment_terms)
@@ -1281,22 +1346,58 @@ def extract_contacts_from_scrape(scrape_data: dict) -> dict:
 
 def geocode_address(indirizzo: str) -> dict:
     """
-    Usa geopy Nominatim per convertire l'indirizzo in lat/lon.
-    user-agent: 'alligator_geo_tool'.
+    v10 — Geocodifica resiliente con fallback automatico.
+    Strategia a 3 livelli:
+      1. Indirizzo completo (es. "Via X, snc, Città, CAP, Provincia")
+      2. Semplificato "Via + Città" (rimuove civico e CAP)
+      3. Solo "Città" come ultimo fallback
+    Timeout: 20s (aumentato da 10s per indirizzi complessi).
+    user-agent: 'alligator_geo_tool_v10'.
     Ritorna {gps_lat, gps_lon} come stringhe, o {} se non trovato/errore.
     Richiede: pip install geopy
     """
     if not indirizzo or not indirizzo.strip():
         return {}
+
     try:
         from geopy.geocoders import Nominatim
-        geolocator = Nominatim(user_agent="alligator_geo_tool")
-        location = geolocator.geocode(indirizzo, timeout=10, country_codes="it")
+        geolocator = Nominatim(user_agent="alligator_geo_tool_v10")
+
+        # Livello 1 — indirizzo completo
+        location = geolocator.geocode(indirizzo, timeout=20, country_codes="it")
         if location:
             return {
                 "gps_lat": str(round(location.latitude,  6)),
                 "gps_lon": str(round(location.longitude, 6)),
             }
+
+        # Livello 2 — semplificato: Via + Città (rimuove CAP, civico, provincia)
+        parts = [p.strip() for p in indirizzo.split(",") if p.strip()]
+        if len(parts) >= 2:
+            # Cerca la città: il primo elemento non-numerico dopo la via
+            via = parts[0]
+            citta = ""
+            for p in parts[1:]:
+                if not re.match(r"^\d{4,5}$", p) and not re.match(r"^[A-Z]{2}$", p):
+                    citta = p
+                    break
+            if citta:
+                query_semplificato = f"{via}, {citta}, Italia"
+                location = geolocator.geocode(query_semplificato, timeout=20, country_codes="it")
+                if location:
+                    return {
+                        "gps_lat": str(round(location.latitude,  6)),
+                        "gps_lon": str(round(location.longitude, 6)),
+                    }
+
+                # Livello 3 — solo città
+                location = geolocator.geocode(f"{citta}, Italia", timeout=20, country_codes="it")
+                if location:
+                    return {
+                        "gps_lat": str(round(location.latitude,  6)),
+                        "gps_lon": str(round(location.longitude, 6)),
+                    }
+
     except Exception:
         pass
     return {}
@@ -1306,7 +1407,7 @@ def geocode_address(indirizzo: str) -> dict:
 # SEZIONE 7d: SENTIMENT & E-E-A-T ESTESO (INT 4 — v8)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SENSORY_SEED = [
+SENSORY_SEED_FOOD = [
     "profumo", "aroma", "fragranza", "bouquet", "sentore", "fruttato",
     "erbaceo", "floreale", "mandorlato", "carciofo", "pomodoro",
     "amaro", "piccante", "piccantezza", "retrogusto", "persistenza",
@@ -1319,32 +1420,99 @@ SENSORY_SEED = [
     "nocellara", "cerasuola",
 ]
 
+# v10 — Keyword E-E-A-T autorità tecnica per agenzie/servizi professionali
+# VIETATO: 'risultati garantiti', 'primo su Google', promesse di posizionamento
+EEAT_AUTHORITY_SEED = [
+    "performance misurabile", "autorità tecnica", "trasparenza dei dati",
+    "approccio strategico", "ottimizzazione semantica", "Premier Partner",
+    "audit tecnico", "benchmark", "ROI documentato", "dati verificabili",
+    "case study", "metodologia proprietaria", "framework validato",
+    "analisi quantitativa", "metriche reali", "report certificato",
+    "competenza verticale", "specializzazione", "track record",
+    "certificazione professionale", "Google Partner", "Meta Partner",
+    "team certificato", "processo documentato",
+]
+
+# Anti-fuffa: termini PROIBITI nella sentiment extraction per agenzie
+EEAT_FORBIDDEN_AGENCY = [
+    "risultati garantiti", "primo su google", "primo su google",
+    "garantiamo", "certifichiamo il successo", "numero uno",
+    "leader indiscusso", "i migliori", "il miglior",
+]
+
 REVIEW_SECTION_PATTERNS = [
     r"(?:recensione|review|commento|feedback|valutazione|opinione|giudizio)",
     r"(?:ha scritto|ha lasciato|cliente dice|utente dice)",
-    r"(?:tripadvisor|google review|trustpilot)",
+    r"(?:tripadvisor|google review|trustpilot|g2\.com|capterra)",
     r"(?:stelle|stars|★|☆|⭐)",
+    r"(?:testimonianza|referenza|caso studio|case study)",
 ]
 
 
-def extract_sentiment_terms(scrape_data: dict) -> list:
+def _detect_sector(scrape_data: dict, servizi: str = "") -> str:
     """
-    Estrae termini sensoriali positivi REALI da recensioni nel testo scraping.
-    VINCOLO: ritorna [] se non ci sono segnali di recensioni reali (no invenzioni).
+    Rileva il settore dall'azienda per scegliere il seed E-E-A-T corretto.
+    Ritorna 'food' | 'agency' | 'generic'.
+    """
+    all_text = (servizi or "") + " ".join(
+        item.get("testo", "")[:500] for item in scrape_data.get("testi", [])[:3]
+    )
+    text_lower = all_text.lower()
+    food_signals = ("olio", "vino", "frantoio", "cantina", "ristorante", "gastronomia",
+                    "agroalimentare", "cibo", "food", "extravergine", "dop", "igp")
+    agency_signals = ("agenzia", "consulenza", "marketing", "seo", "geo", "web",
+                      "digital", "software", "sviluppo", "comunicazione", "media")
+    food_score   = sum(1 for s in food_signals   if s in text_lower)
+    agency_score = sum(1 for s in agency_signals if s in text_lower)
+    if food_score > agency_score:
+        return "food"
+    if agency_score > 0:
+        return "agency"
+    return "generic"
+
+
+def extract_sentiment_terms(scrape_data: dict, servizi: str = "") -> list:
+    """
+    v10 — Estrae keyword E-E-A-T REALI da testi/recensioni nel scraping.
+
+    REGOLE ANTI-FUFFA (ASSOLUTE):
+    - È SEVERAMENTE VIETATO usare 'risultati garantiti', 'primo su Google'
+      o promesse simili di posizionamento.
+    - Per agenzie/servizi: usa EEAT_AUTHORITY_SEED (autorità tecnica).
+    - Per food/oleifici: usa SENSORY_SEED_FOOD (termini sensoriali).
+    - Se non ci sono segnali di recensioni reali: ritorna [] (no invenzioni).
     """
     all_text = " ".join(item.get("testo", "") for item in scrape_data.get("testi", []))
     if not all_text.strip():
         return []
+
+    # Almeno un segnale di recensione/feedback deve essere presente
     has_reviews = any(re.search(p, all_text, re.IGNORECASE) for p in REVIEW_SECTION_PATTERNS)
     if not has_reviews:
         return []
+
+    sector = _detect_sector(scrape_data, servizi)
+    if sector == "food":
+        seed = SENSORY_SEED_FOOD
+    elif sector == "agency":
+        seed = EEAT_AUTHORITY_SEED
+    else:
+        seed = SENSORY_SEED_FOOD + EEAT_AUTHORITY_SEED
+
+    # Filtra termini proibiti
+    forbidden_lower = [f.lower() for f in EEAT_FORBIDDEN_AGENCY]
+
     found = []
     text_lower = all_text.lower()
     neg_signals = ("non ", "senza ", "poco ", "scarso", "negativo", "cattivo")
-    for term in SENSORY_SEED:
-        if term.lower() in text_lower:
-            idx = text_lower.find(term.lower())
-            context = text_lower[max(0, idx-40): idx+len(term)+40]
+    for term in seed:
+        term_lower = term.lower()
+        # Blocca termini proibiti
+        if any(f in term_lower for f in forbidden_lower):
+            continue
+        if term_lower in text_lower:
+            idx = text_lower.find(term_lower)
+            context = text_lower[max(0, idx - 40): idx + len(term_lower) + 40]
             if not any(neg in context for neg in neg_signals):
                 found.append(term)
     return list(dict.fromkeys(found))[:10]
@@ -1369,11 +1537,26 @@ def enrich_meta_with_sentiment(page_meta: dict, sentiment_terms: list) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 CATEGORY_PRICE_MAP = {
+    # Food & Agri
     "dop": "Premium", "igp": "€€€", "biologico": "€€€", "bio": "€€€",
     "extravergine": "€€", "gourmet": "Premium", "riserva": "Premium",
     "affiorante": "Premium", "monocultivar": "€€€", "cosmetico": "€€",
     "cosmesi": "€€", "infuso": "€€",
+    # Servizi professionali / Agenzie (v10 — Commercial Entity)
+    "consulenza": "€€", "audit": "€€", "seo": "€€", "geo": "€€",
+    "marketing": "€€", "strategia": "€€", "piano editoriale": "€€",
+    "formazione": "€€", "workshop": "€€", "corso": "€€",
+    "sviluppo web": "€€€", "sviluppo": "€€€", "software": "€€€",
+    "premium": "Premium", "enterprise": "€€€",
 }
+
+# Segnali di prodotto/servizio valido per agenzie (v10)
+_SERVICE_PRODUCT_SIGNALS = re.compile(
+    r"\b(?:consulenza|audit|seo|geo|marketing|piano|strategia|report|analisi|"
+    r"formazione|workshop|corso|sviluppo|software|pacchetto|servizio|"
+    r"abbonamento|contratto|progetto|campagna|gestione)\b",
+    re.IGNORECASE,
+)
 
 
 def _slugify_product(name: str) -> str:
@@ -1446,8 +1629,8 @@ def build_products_from_fatti(fatti: str, azienda: str = "") -> list:
         if _PURE_AWARD_PATTERNS.search(line):
             continue  # è un award puro — non un prodotto
 
-        # FILTRO 2: la riga deve contenere almeno un segnale di prodotto reale
-        if not _PRODUCT_NAME_SIGNALS.search(line):
+        # FILTRO 2: la riga deve contenere almeno un segnale di prodotto O servizio reale
+        if not (_PRODUCT_NAME_SIGNALS.search(line) or _SERVICE_PRODUCT_SIGNALS.search(line)):
             continue
 
         is_award = bool(re.search(
@@ -1503,8 +1686,51 @@ def build_products_from_fatti(fatti: str, azienda: str = "") -> list:
     return products[:8]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 7f: INTERNAL LINKING MAP (INT 5 — v8)
+def build_service_products(servizi: str, azienda: str = "") -> list:
+    """
+    v10 — Commercial Entity: tratta i servizi principali come prodotti Schema.org.
+    Utile per agenzie, studi professionali, SaaS — aumenta la visibilità
+    nelle query commerciali AI (es. "agenzie SEO con audit incluso").
+
+    Converte ogni servizio in un Product con name, category, priceRange.
+    Assegna 'Premium' o '€€' in base al servizio rilevato.
+    """
+    if not servizi:
+        return []
+
+    service_list = [s.strip().strip("·•-") for s in re.split(r"[,;\n·•]+", servizi) if s.strip()]
+    products = []
+    seen: set = set()
+
+    for svc in service_list[:8]:
+        if not svc or len(svc) < 3 or svc in seen:
+            continue
+        seen.add(svc)
+
+        svc_lower = svc.lower()
+        category  = ""
+        price_range = "€€"
+        for cat_key, price in CATEGORY_PRICE_MAP.items():
+            if cat_key in svc_lower:
+                category   = cat_key.title()
+                price_range = price
+                break
+
+        if not category:
+            # Fallback: rileva se è servizio enterprise/premium
+            if any(k in svc_lower for k in ("enterprise", "premium", "avanzato", "full")):
+                price_range = "Premium"
+            category = "Servizio Professionale"
+
+        products.append({
+            "name":        svc.title(),
+            "description": f"{svc} offerto da {azienda}" if azienda else svc,
+            "award":       "",
+            "category":    category,
+            "priceRange":  price_range,
+        })
+
+    return products
 # ─────────────────────────────────────────────────────────────────────────────
 
 SILO_LINK_RULES = [
@@ -1534,28 +1760,127 @@ def build_internal_linking_map(
     lingua: str = "italiano",
 ) -> dict:
     """
-    Genera internal_linking_suggestions basato su silo architecture.
-    Ritorna dict con suggerimenti strutturati per URL sorgente.
+    v10 — Internal Linking Map con context reset + Silo Architecture v10.
+
+    NOVITÀ v10:
+    - Resetta completamente il buffer di regole prima di ogni run.
+    - I suggerimenti si basano ESCLUSIVAMENTE sulle entità rilevate nell'ultima run
+      (servizi + pagine generate), evitando cross-contaminazione tra clienti diversi.
+    - Zero link a settori non rilevanti (es. niente 'cosmesi' per un'agenzia tech).
     """
+    # ── RESET COMPLETO DEL CONTESTO SILO (anti-allucinazione settoriale) ──────
+    # Costruiamo le regole dinamicamente dalle entità della run corrente,
+    # NON da SILO_LINK_RULES globali che potrebbero contenere residui food/retail.
+    servizi_lower  = (servizi or "").lower()
+    base           = (base_url or "https://www.sito.it").rstrip("/")
+
+    # Identifica i topic REALI presenti in questa run
+    _has_faq     = bool(generated.get("faq"))
+    _has_service = bool(generated.get("pagina_servizio"))
+    _has_products= bool(generated.get("prodotti") or generated.get("products"))
+    _has_blog    = "blog" in servizi_lower
+    _has_case    = any(k in servizi_lower for k in ("case study","caso studio","portfolio"))
+    _has_storia  = any(k in servizi_lower for k in ("storia","chi siamo","about","fondato","founded"))
+    _is_food     = any(k in servizi_lower for k in ("olio","vino","cibo","food","ristorante","frantoio","gastronomia"))
+    _is_agency   = any(k in servizi_lower for k in ("agenzia","marketing","seo","geo","consulenza","web","digital"))
+
+    # Costruisce la mappa pagine SOLO dalle entità rilevate
+    page_map: dict = {"homepage": base + "/", "contatti": base + "/contatti/"}
+    if _has_faq:      page_map["faq"]      = base + "/faq/"
+    if _has_service:  page_map["servizi"]  = base + "/servizi/"
+    if _has_products: page_map["prodotti"] = base + "/prodotti/"
+    if _has_blog:     page_map["blog"]     = base + "/blog/"
+    if _has_case:     page_map["case study"] = base + "/case-study/"
+    if _has_storia:   page_map["storia"]   = base + "/chi-siamo/"
+
+    # Aggiunge pagine food SOLO se settore food rilevato
+    if _is_food:
+        page_map.update({
+            "qualità":        base + "/qualita/",
+            "certificazioni": base + "/certificazioni/",
+            "cosmesi":        base + "/cosmesi/",
+            "premi":          base + "/premi-riconoscimenti/",
+        })
+
+    # Aggiunge pagine agenzia SOLO se settore agenzia rilevato
+    if _is_agency:
+        page_map.update({
+            "audit":    base + "/audit/",
+            "risultati": base + "/risultati/",
+            "metodologia": base + "/metodologia/",
+        })
+
+    # ── Regole silo dinamiche (solo entità presenti) ───────────────────────────
+    DYNAMIC_RULES: list = []
+
+    # Regole universali (sempre valide)
+    DYNAMIC_RULES += [
+        ("homepage", "faq",      "Homepage → FAQ per ridurre il bounce rate"),
+        ("homepage", "contatti", "Homepage → contatti (conversion base)"),
+    ]
+    if _has_service:
+        DYNAMIC_RULES += [
+            ("homepage",  "servizi",   "Homepage → pagina servizi principale"),
+            ("servizi",   "contatti",  "Servizi → contatti per richiesta preventivo"),
+        ]
+    if _has_faq and _has_service:
+        DYNAMIC_RULES.append(("faq", "servizi", "FAQ → servizi per rispondere 'come funziona'"))
+    if _has_faq:
+        DYNAMIC_RULES.append(("faq", "contatti", "FAQ → contatti per rispondere 'come ordinare'"))
+    if _has_products:
+        DYNAMIC_RULES += [
+            ("homepage",  "prodotti",  "Homepage → pagina prodotti principale"),
+            ("servizi",   "prodotti",  "Servizi → prodotti correlati"),
+        ]
+    if _has_blog and _has_service:
+        DYNAMIC_RULES += [
+            ("blog",     "servizi",   "Articoli blog → pagina servizi pertinente"),
+            ("servizi",  "blog",      "Servizi → articoli tematici correlati"),
+        ]
+    if _has_case and _has_service:
+        DYNAMIC_RULES.append(("servizi", "case study", "Servizi → case study per aumentare trust"))
+
+    # Regole food (solo se settore food)
+    if _is_food:
+        if "premi" in page_map and _has_products:
+            DYNAMIC_RULES.append(("premi", "prodotti", "Premi → prodotti premiati"))
+        if "certificazioni" in page_map and _has_products:
+            DYNAMIC_RULES.append(("certificazioni", "prodotti", "Certificazioni → linea prodotti certificati"))
+        if "cosmesi" in page_map and "qualità" in page_map:
+            DYNAMIC_RULES.append(("cosmesi", "qualità", "Cosmesi → 'Qualità dell'Olio' come ingrediente base"))
+
+    # Regole agenzia (solo se settore agenzia)
+    if _is_agency:
+        if "metodologia" in page_map and _has_service:
+            DYNAMIC_RULES.append(("servizi", "metodologia", "Servizi → metodologia per aumentare autorità"))
+        if "risultati" in page_map and _has_case:
+            DYNAMIC_RULES.append(("case study", "risultati", "Case study → pagina risultati per proof"))
+
     # Traduzioni anchor text per lingua output
     ANCHOR_TRANSLATIONS = {
         "spagnolo": {
-            "homepage": "Inicio", "storia": "Historia", "qualità olio": "Calidad del Aceite",
+            "homepage": "Inicio", "storia": "Historia", "qualità": "Calidad",
             "certificazioni": "Certificaciones", "cosmesi": "Cosmética", "premi": "Premios",
             "contatti": "Contacto", "blog": "Blog", "servizi": "Servicios",
             "faq": "Preguntas Frecuentes", "prodotti": "Productos",
+            "case study": "Casos de Éxito", "metodologia": "Metodología",
+            "audit": "Auditoría", "risultati": "Resultados",
         },
         "inglese": {
-            "homepage": "Home", "storia": "Our Story", "qualità olio": "Oil Quality",
+            "homepage": "Home", "storia": "Our Story", "qualità": "Quality",
             "certificazioni": "Certifications", "cosmesi": "Cosmetics", "premi": "Awards",
             "contatti": "Contact", "blog": "Blog", "servizi": "Services",
             "faq": "FAQ", "prodotti": "Products",
+            "case study": "Case Studies", "metodologia": "Methodology",
+            "audit": "Audit", "risultati": "Results",
         },
         "francese": {
-            "homepage": "Accueil", "storia": "Notre Histoire", "qualità olio": "Qualité de l'Huile",
+            "homepage": "Accueil", "storia": "Notre Histoire", "qualità": "Qualité",
             "certificazioni": "Certifications", "cosmesi": "Cosmétique", "premi": "Récompenses",
             "contatti": "Contact", "blog": "Blog", "servizi": "Services",
             "faq": "FAQ", "prodotti": "Produits",
+            "case study": "Études de Cas", "metodologia": "Méthodologie",
+            "audit": "Audit", "risultati": "Résultats",
         },
     }
     anchor_map = ANCHOR_TRANSLATIONS.get(lingua.lower(), {})
@@ -1564,59 +1889,27 @@ def build_internal_linking_map(
         return anchor_map.get(topic, topic.title())
 
     suggestions: dict = {}
-    servizi_lower = (servizi or "").lower()
-    base = (base_url or "https://www.sito.it").rstrip("/")
 
-    page_map = {
-        "homepage":      base + "/",
-        "storia":        base + "/chi-siamo/",
-        "qualità olio":  base + "/qualita/",
-        "certificazioni":base + "/certificazioni/",
-        "cosmesi":       base + "/cosmesi/",
-        "premi":         base + "/premi-riconoscimenti/",
-        "contatti":      base + "/contatti/",
-        "blog":          base + "/blog/",
-    }
-    if generated.get("pagina_servizio"):
-        page_map["servizi"]  = base + "/servizi/"
-    if generated.get("faq"):
-        page_map["faq"]      = base + "/faq/"
-    if generated.get("prodotti") or generated.get("products"):
-        page_map["prodotti"] = base + "/prodotti/"
-
-    for source_topic, target_topic, rationale in SILO_LINK_RULES:
-        source_relevant = (source_topic in servizi_lower or source_topic in page_map)
+    for source_topic, target_topic, rationale in DYNAMIC_RULES:
+        source_url = page_map.get(source_topic, "")
         target_url = page_map.get(target_topic, "")
-        if not (source_relevant and target_url):
+        if not (source_url and target_url):
             continue
-        source_url = page_map.get(source_topic, base + f"/{source_topic.replace(' ','-')}/")
         if source_url not in suggestions:
             suggestions[source_url] = []
         suggestions[source_url].append({
             "target_url":  target_url,
             "anchor_text": get_anchor(target_topic),
             "rationale":   rationale,
-            "priority":    "high" if source_topic in ("homepage", "faq", "prodotti") else "medium",
+            "priority":    "high" if source_topic in ("homepage", "faq") else "medium",
         })
-
-    # Link canonici homepage → sezioni generate
-    home_links = []
-    for pk, pu in page_map.items():
-        if pu != base + "/" and pk not in ("storia","qualità olio","certificazioni","cosmesi","premi","contatti","blog"):
-            home_links.append({
-                "target_url":  pu,
-                "anchor_text": get_anchor(pk),
-                "rationale":   f"Homepage → {pk} (struttura silo base)",
-                "priority":    "high",
-            })
-    if home_links:
-        suggestions[base + "/"] = home_links
 
     return {
         "internal_linking_suggestions": suggestions,
         "_silo_note": (
-            "Suggerimenti generati da regole di silo architecture Alligator v8. "
-            "Priorità 'high' = link fondamentale per crawl budget e topical authority. "
+            f"Suggerimenti Silo v10 — generati da entità rilevate in questa run "
+            f"({'food' if _is_food else 'agency' if _is_agency else 'generic'} sector). "
+            "Context reset attivo: zero link a settori non pertinenti. "
             "Verifica che le URL target esistano prima dell'implementazione."
         ),
     }
@@ -2001,10 +2294,24 @@ SENZA quantificare.
 
 def build_system_prompt(stile_esempi: str = "", lingua: str = "italiano") -> str:
     lingua_upper = lingua.upper()
-    lang_constraint = f"""⚠️ CRITICAL — OUTPUT LANGUAGE: {lingua_upper}
-ALL JSON field values (h1, intro, body, domanda, risposta, cta, steps, lista, description, etc.)
-MUST be written in {lingua_upper}. This rule is ABSOLUTE and overrides every other instruction.
-Do NOT use Italian unless the output language is explicitly Italian.\n\n"""
+    # v10 — STRICT MODE: lingua iniettata come vincolo primario triple-locked
+    lang_constraint = f"""╔══════════════════════════════════════════════════════════════════╗
+║  🔒 LINGUA OUTPUT — STRICT MODE v10 — VINCOLO PRIMARIO ASSOLUTO ║
+╠══════════════════════════════════════════════════════════════════╣
+║  OUTPUT LANGUAGE: {lingua_upper:<46}║
+║                                                                  ║
+║  OGNI valore stringa del JSON (h1, intro, body, domanda,         ║
+║  risposta, cta, steps, lista, description, meta_description,    ║
+║  schema description, knowsAbout, award, category, rationale)    ║
+║  DEVE essere scritto in {lingua_upper}.                               ║
+║                                                                  ║
+║  QUESTO VINCOLO SOVRASCRIVE OGNI ALTRA ISTRUZIONE.               ║
+║  Non usare MAI un'altra lingua in nessun campo JSON.             ║
+║  Non cambiare lingua tra un modulo e il successivo.              ║
+║  Se hai dubbi: scrivi in {lingua_upper}.                              ║
+╚══════════════════════════════════════════════════════════════════╝
+
+"""
 
     alligator_rules = """APPROCCIO ALLIGATOR (OBBLIGATORIO):
 - DIRETTO ma MAI TELEGRAFICO: frasi complete con soggetto-verbo-complemento.
@@ -2676,7 +2983,7 @@ def faq_to_md(faqs):
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
-        page_title="GEO Score™ v10 — Alligator Edition",
+        page_title="GEO Score™ v10 — The Authority Orchestrator",
         page_icon="🐊",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -2711,8 +3018,8 @@ def main():
 
     st.markdown("""
     <div class="geo-header">
-        <h1>🐊 GEO Score™ Content Generator v10 — Alligator Edition</h1>
-        <p>Geocodifica GPS · Contatti Auto · Product Schema · Hybrid FAQ · Sentiment E-E-A-T · Internal Linking Silo · Framework GEO Score™ by Nico Fioretti</p>
+        <h1>🐊 GEO Score™ Content Generator v10 — The Authority Orchestrator</h1>
+        <p>Strict Multilang · Anti-Fuffa E-E-A-T · Geocodifica Resiliente · Silo v10 · Commercial Entity Schema · P.IVA · Social Hub · Framework GEO Score™ by Nico Fioretti</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -3024,9 +3331,9 @@ def main():
                 if contacts_extracted.get("email") and not _loc_enriched.get("email","").strip():
                     _loc_enriched["email"] = contacts_extracted["email"]
 
-            # INT 1 — Geocodifica automatica (solo se coordinate non già inserite)
+            # INT 1 — Geocodifica resiliente v10 (3 livelli di fallback, timeout 20s)
             if not _loc_enriched.get("gps_lat","").strip() and _loc_enriched.get("indirizzo","").strip():
-                with st.spinner("🌍 Geocodifica indirizzo in corso (geopy)..."):
+                with st.spinner("🌍 Geocodifica resiliente v10 in corso (fallback automatico)..."):
                     geo_coords = geocode_address(_loc_enriched["indirizzo"])
                     if geo_coords:
                         _loc_enriched.update(geo_coords)
@@ -3126,9 +3433,9 @@ def main():
                     "anno_fondazione": _loc_enriched.get("anno_fondazione",""),
                 }
 
-            # ── POST-PROCESS PIPELINE v8 ───────────────────────────────
+            # ── POST-PROCESS PIPELINE v10 ───────────────────────────────
             if generated:
-                with st.spinner("🔧 Post-processing v8: facts · products · sentiment · linking map..."):
+                with st.spinner("🔧 Post-processing v10: facts · products · P.IVA · social hub · sentiment · silo..."):
                     schema_type_pp = "LocalBusiness" if _loc_enriched.get("indirizzo","").strip() else "Organization"
                     generated = post_process(
                         generated      = generated,
@@ -3141,16 +3448,32 @@ def main():
                         scrape_data    = scrape_data_raw,
                         lingua         = _ln,
                     )
+                    # Feedback P.IVA (v10)
+                    vat = _loc_enriched.get("vat_id","")
+                    if vat:
+                        st.success(f"🧾 P.IVA rilevata: **{vat}** → iniettata in Organization schema (vatID)")
+                    # Feedback social hub (v10)
+                    schema_obj = generated.get("schema_markup", {})
+                    same_as_list = []
+                    for node in schema_obj.get("@graph", []):
+                        if node.get("@type") in ("Organization", "LocalBusiness"):
+                            same_as_list = node.get("sameAs", [])
+                            break
+                    social_count = len([u for u in same_as_list if any(
+                        s in u for s in ("facebook","instagram","linkedin","twitter","youtube","tiktok")
+                    )])
+                    if social_count > 0:
+                        st.success(f"🌐 Social Hub: {social_count} profili social nel grafo sameAs")
                     # Feedback sentiment
                     st_terms = generated.get("sentiment_keywords", [])
                     if st_terms:
-                        st.success(f"🎯 Sentiment E-E-A-T: {len(st_terms)} keyword sensoriali reali iniettate")
+                        st.success(f"🎯 Sentiment E-E-A-T: {len(st_terms)} keyword reali iniettate")
                     else:
                         st.info("ℹ️ Sentiment: nessuna recensione reale rilevata — campo omesso (no invenzioni)")
                     # Feedback linking
                     links = generated.get("internal_linking_suggestions", {})
                     if links:
-                        st.success(f"🔗 Internal Linking Map: {sum(len(v) for v in links.values())} suggerimenti generati")
+                        st.success(f"🔗 Silo v10: {sum(len(v) for v in links.values())} link suggeriti (context reset attivo)")
 
             progress.progress(100, text="✅ Generazione completata!")
 
@@ -3212,6 +3535,12 @@ def main():
                 f'<div class="truth-box"><b>🤖 AI Summary</b> <em>(GEO — chi è, cosa fa, dove opera)</em><br>{ai_sum}</div>',
                 unsafe_allow_html=True
             )
+
+        # ── P.IVA & Social Hub (v10) ──────────────────────────────────
+        _loc_res = st.session_state.get("local_seo_enriched", {})
+        vat_res  = _loc_res.get("vat_id","")
+        if vat_res:
+            st.markdown(f"🧾 **P.IVA:** `{vat_res}` — iniettata in `Organization.vatID`")
 
         # ── Entities (v5) ─────────────────────────────────────────────
         entities = data.get("entities", {})
@@ -3363,7 +3692,7 @@ def main():
         st.download_button(
             "⬇️ Scarica pacchetto completo (JSON con fonti)",
             data=json.dumps(export, ensure_ascii=False, indent=2),
-            file_name=f"geo_alligator_v5_{_az.replace(' ','_').lower()}.json",
+            file_name=f"geo_alligator_v10_{_az.replace(' ','_').lower()}.json",
             mime="application/json"
         )
 
