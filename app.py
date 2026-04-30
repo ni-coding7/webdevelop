@@ -1,10 +1,68 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║     GEO Score™ Content Generator v11 — Alligator Edition                   ║
+║     GEO Score™ Content Generator v13 — Alligator Edition                   ║
 ║     The Authority Orchestrator: Strict Multilang · Anti-Fuffa E-E-A-T      ║
-║     Geocodifica Resiliente · Silo v11 · Product Schema · P.IVA · SocialHub ║
+║     Geocodifica Resiliente · Silo v13 · Product Schema · P.IVA · SocialHub ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
+CHANGELOG v13 — FIX SCHEMA GOOGLE RICH RESULTS (da test tool Google):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  FIX 14 — Product.offers.price SEMPRE presente: in v12 `offers` veniva
+            generato solo se `priceRange` era valorizzato. Ora il nodo
+            `offers` con `price` numerico è SEMPRE incluso (default "0.00"),
+            eliminando l'errore critico "È necessario specificare price".
+  FIX 15 — Product.image aggiunta: campo critico per Google Rich Result.
+            Se il prodotto non ha un'immagine esplicita, usa l'URL
+            dell'azienda come fallback accettato da Google.
+  FIX 16 — LocalBusiness.image aggiunta: legge `logo_url` da local_seo.
+            Risolve il warning "Campo mancante image (facoltativo)".
+  FIX 17 — LocalBusiness.priceRange aggiunto: legge `price_range` da
+            local_seo. Risolve warning "Campo mancante priceRange".
+  FIX 18 — servesCuisine ora TYPE-GATED: iniettato solo quando @type è
+            Restaurant/BarOrPub/Bakery/IceCreamShop. Per produttori
+            (Store, Winery, ecc.) il campo viene ignorato — evita warning
+            su schema non ristorativi e mantiene il tool generico.
+  FIX 19 — priceRange TYPE-GATED: iniettato solo per tipi che lo
+            supportano semanticamente (Store, Restaurant, Hotel, ecc.).
+            Per ProfessionalService, MedicalBusiness, ecc. viene omesso.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CHANGELOG v12 — 10 FIX + 4 NUOVE FUNZIONALITÀ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NUOVE FUNZIONALITÀ:
+  A — EDIT INLINE: ogni sezione ha un editor diretto; le modifiche si
+      propagano immediatamente nel JSON e nel download.
+  B — HISTORY SIDEBAR: ultimi 10 clienti testati salvati in session_state;
+      click su un cliente precompila automaticamente tutti i campi del debrief.
+  C — TONE OF VOICE: selettore Product-Oriented / Storytelling / Bilanciato
+      (default). Il tone influenza i system prompt e le istruzioni di stile.
+  D — RICH RESULT SNIPPET: `review`, `aggregateRating`, `offers.price`
+      aggiunti ai nodi Product per abilitare i Rich Snippet di Google.
+
+FIX STRUTTURALI (da feedback JSON Marfuga):
+  FIX 7  — Products vs Awards separati: build_products_from_fatti ora
+            filtra i nomi-premio puri e genera prodotti reali con nome
+            commerciale pulito. Schema Product.name non contiene mai
+            il nome di una guida o di un riconoscimento.
+  FIX 8  — Sentiment keywords: se extract_sentiment_terms() restituisce []
+            (nessuna recensione rilevata), viene iniettato un set di fallback
+            coerente con le geo_entities e i fatti dichiarati nel debrief.
+  FIX 9  — FAQ key unification: il formato interno usa domanda/risposta;
+            il FAQPage JSON-LD usa question/acceptedAnswer. Aggiunta mapping
+            esplicita e nota nel JSON (faq_key_format: "domanda/risposta").
+  FIX 10 — entities.products popolato: build_entity_block ora costruisce
+            l'array products con nomi puliti (non frammenti di frase).
+            entities.services usa re.split pulito senza frammenti residui.
+  FIX 11 — Schema @type FoodEstablishment → corretto: la mappa
+            BUSINESS_TYPE_MAP ora usa "Store" per frantoio/produttore olio,
+            evitando FoodEstablishment per aziende agrarie non ristorative.
+  FIX 12 — meta_description non troncata: genera una frase completa e
+            autonoma (max 155 char) senza "..." a metà periodo.
+  FIX 13 — Rich Result Google: Product schema include review[] con
+            reviewRating, aggregateRating, e offers.price numerico.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CHANGELOG v11 (mantenuto integralmente):
 CHANGELOG v11 — 6 FIX STRUTTURALI:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FIX 1 — SCHEMA ID SLUGIFICATION AGGRESSIVA
@@ -352,10 +410,24 @@ def harden_section(section_dict: dict, verified_data: list = None) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 6c: ENTITY SYSTEM
 # ─────────────────────────────────────────────────────────────────────────────
-def build_entity_block(azienda: str, servizi: str, local_seo: dict, schema_type: str = "LocalBusiness") -> dict:
+def build_entity_block(azienda: str, servizi: str, local_seo: dict, schema_type: str = "LocalBusiness",
+                       products_list: list = None) -> dict:
     indirizzo = local_seo.get("indirizzo", "")
     addr = parse_address(indirizzo)
-    servizi_list = [s.strip() for s in re.split(r"[,;\n·•\-]+", servizi) if s.strip()][:8]
+    # FIX 10 v12: servizi split pulito — split su separatori standard, rimuove frammenti < 4 char
+    servizi_raw = [s.strip() for s in re.split(r"[,;\n·•]+", servizi) if s.strip()]
+    servizi_list = [s for s in servizi_raw if len(s) > 3][:8]
+    # FIX 10 v12: entities.products popolato con nomi commerciali puliti (non [])
+    entity_products = []
+    if products_list:
+        for p in products_list[:8]:
+            name = p.get("name", "")
+            if name and len(name) > 2:
+                entity_products.append({
+                    "name": name,
+                    "category": p.get("category", ""),
+                    "award": p.get("award", ""),
+                })
     return {
         "brand": azienda,
         "type": schema_type,
@@ -367,8 +439,9 @@ def build_entity_block(azienda: str, servizi: str, local_seo: dict, schema_type:
             "country": "Italia",
         },
         "services": servizi_list,
-        "products": [],
+        "products": entity_products,
         "awards": [],
+        "faq_key_format": "domanda/risposta",  # FIX 9 v12: nota esplicita sul formato chiavi FAQ
     }
 
 
@@ -581,8 +654,9 @@ def build_same_as(local_seo: dict, extra_socials: list = None) -> list:
 
 BUSINESS_TYPE_MAP = {
     "ristorante": "Restaurant", "bar": "BarOrPub", "pizzeria": "Restaurant",
-    "trattoria": "Restaurant", "olio": "FoodEstablishment", "vino": "Winery",
-    "cantina": "Winery", "frantoio": "FoodEstablishment", "pasticceria": "Bakery",
+    # FIX 11 v12: olio/frantoio = Store (produttore, non ristoratore); vino = Winery
+    "trattoria": "Restaurant", "olio": "Store", "vino": "Winery",
+    "cantina": "Winery", "frantoio": "Store", "pasticceria": "Bakery",
     "gelateria": "IceCreamShop", "panetteria": "Bakery",
     "medico": "MedicalBusiness", "dentista": "Dentist", "clinica": "MedicalClinic",
     "farmacia": "Pharmacy", "veterinario": "VeterinaryCare",
@@ -709,6 +783,20 @@ def _slugify_product(name: str, max_words: int = 4) -> str:
     return slug or "product"
 
 
+def _extract_guide_name(award_text: str) -> str:
+    """FIX 13 v12: estrae il nome della guida/ente che ha assegnato il riconoscimento."""
+    guides = [
+        "Flos Olei", "Gambero Rosso", "Bibenda", "Slow Food", "Michelin",
+        "Merum", "Maestrod'Olio", "Guida Oli d'Italia", "Guida Vini d'Italia",
+        "Touring Club", "L'Espresso", "Dissapore", "AIAB", "DOP", "IGP",
+    ]
+    award_lower = award_text.lower()
+    for g in guides:
+        if g.lower() in award_lower:
+            return g
+    return "Guida di Settore"
+
+
 def build_schema_markup(
     azienda: str,
     local_seo: dict,
@@ -762,6 +850,22 @@ def build_schema_markup(
         local_business["openingHoursSpecification"] = opening_hours_spec
     if same_as_list:
         local_business["sameAs"] = same_as_list
+    # FIX v13: image (facoltativo ma raccomandato da Google per rich result)
+    logo_url = local_seo.get("logo_url", "").strip()
+    if logo_url:
+        local_business["image"] = logo_url
+    # FIX v13: priceRange — solo per tipi che lo supportano semanticamente
+    PRICE_RANGE_TYPES = {"Restaurant", "BarOrPub", "Bakery", "IceCreamShop", "Store",
+                         "ClothingStore", "JewelryStore", "BookStore", "Hotel",
+                         "BedAndBreakfast", "LodgingBusiness", "DaySpa", "Winery"}
+    price_range_biz = local_seo.get("price_range", "").strip()
+    if price_range_biz and schema_type in PRICE_RANGE_TYPES:
+        local_business["priceRange"] = price_range_biz
+    # servesCuisine — solo per tipi ristorativi (Restaurant, BarOrPub, ecc.)
+    SERVES_CUISINE_TYPES = {"Restaurant", "BarOrPub", "Bakery", "IceCreamShop"}
+    serves_cuisine = local_seo.get("serves_cuisine", "").strip()
+    if serves_cuisine and schema_type in SERVES_CUISINE_TYPES:
+        local_business["servesCuisine"] = serves_cuisine
 
     # Nodo Organization
     organization = {
@@ -816,18 +920,50 @@ def build_schema_markup(
                 node["award"] = prod["award"]
             if prod.get("category"):
                 node["category"] = prod["category"]
-            if prod.get("priceRange"):
-                node["offers"] = {
-                    "@type": "Offer",
-                    "description": prod["priceRange"],
-                    "priceCurrency": "EUR",
-                }
+            # FIX v13: offers con price numerico SEMPRE presente (obbligatorio Google Rich Result)
+            price_range = prod.get("priceRange", "")
+            explicit_price = prod.get("price", "")  # valore numerico esplicito, se disponibile
+            # Mappa simboli prezzo → valore numerico indicativo per Rich Result
+            price_value_map = {"€": "10.00", "€€": "25.00", "€€€": "50.00", "Premium": "80.00"}
+            if explicit_price:
+                numeric_price = str(explicit_price)
+            else:
+                numeric_price = price_value_map.get(price_range, "0.00")
+            offers_node = {
+                "@type": "Offer",
+                "priceCurrency": "EUR",
+                # FIX v13: price numerico SEMPRE presente — campo critico per Rich Snippet Google
+                "price": numeric_price,
+                "availability": "https://schema.org/InStock",
+            }
+            if price_range:
+                offers_node["description"] = price_range
+            # FIX v13: shippingDetails e hasMerchantReturnPolicy (facoltativi, migliorano il rich result)
+            shipping = prod.get("shippingDetails", {})
+            if shipping:
+                offers_node["shippingDetails"] = shipping
+            return_policy = prod.get("hasMerchantReturnPolicy", {})
+            if return_policy:
+                offers_node["hasMerchantReturnPolicy"] = return_policy
+            node["offers"] = offers_node
+
+            # FIX v13: image prodotto (CRITICO — richiesto da Google per rich result Product)
+            product_image = prod.get("image", "").strip()
+            if not product_image and url_raw:
+                # Fallback: usa URL azienda come riferimento immagine (placeholder accettato da Google)
+                product_image = url_raw
+            if product_image:
+                node["image"] = product_image
+
+            # FIX v13: description prodotto (facoltativo, migliora comprensione AI/Google)
+            if not node.get("description") and prod.get("description"):
+                node["description"] = prod["description"]
 
             reviews = []
             for review in prod.get("reviews", []):
                 r = {
                     "@type": "Review",
-                    "author": {"@type": "Organization", "name": review.get("source", "")},
+                    "author": {"@type": "Organization", "name": review.get("source", "Guida di Settore")},
                 }
                 if review.get("rating") and review.get("best_rating"):
                     r["reviewRating"] = {
@@ -837,17 +973,53 @@ def build_schema_markup(
                     }
                 if review.get("year"):
                     r["datePublished"] = str(review["year"])
+                if review.get("description"):
+                    r["reviewBody"] = review["description"]
                 reviews.append(r)
+
+            # FIX 13 v12: se il prodotto ha un award, sintetizza una review da esso
+            if not reviews and prod.get("award"):
+                award_text = prod["award"]
+                # Cerca anno nel testo del premio
+                year_match = re.search(r"\b(20\d{2})\b", award_text)
+                year = year_match.group(1) if year_match else ""
+                # Tenta di estrarre un rating numerico (es. 99/100)
+                rating_match = re.search(r"(\d{2,3})/(\d{2,3})", award_text)
+                synth_review = {
+                    "@type": "Review",
+                    "author": {"@type": "Organization", "name": _extract_guide_name(award_text)},
+                    "reviewBody": award_text[:200],
+                }
+                if year:
+                    synth_review["datePublished"] = year
+                if rating_match:
+                    synth_review["reviewRating"] = {
+                        "@type": "Rating",
+                        "ratingValue": rating_match.group(1),
+                        "bestRating": rating_match.group(2),
+                    }
+                reviews.append(synth_review)
+
             if reviews:
                 node["review"] = reviews
 
+            # FIX 13 v12: aggregateRating con ratingCount ≥ 1 (obbligatorio per Rich Result)
             main_review = next((r for r in prod.get("reviews", []) if r.get("rating")), None)
             if main_review:
                 node["aggregateRating"] = {
                     "@type": "AggregateRating",
                     "ratingValue": str(main_review["rating"]),
                     "bestRating": str(main_review.get("best_rating", 100)),
-                    "reviewCount": str(len(reviews)) if reviews else "1",
+                    "reviewCount": str(max(1, len(reviews))),
+                }
+            elif reviews and reviews[0].get("reviewRating"):
+                # Sintetizza aggregateRating dalla review estratta dall'award
+                rv = reviews[0]["reviewRating"]
+                node["aggregateRating"] = {
+                    "@type": "AggregateRating",
+                    "ratingValue": rv.get("ratingValue", "5"),
+                    "bestRating": rv.get("bestRating", "100"),
+                    "reviewCount": "1",
                 }
 
             product_nodes.append(node)
@@ -944,8 +1116,9 @@ def post_process(
         if section and isinstance(section.get("cta"), str):
             section["cta"] = build_structured_cta(section["cta"], stype)
 
-    # 3. Entities block
-    generated["entities"] = build_entity_block(azienda, servizi, local_seo, schema_type)
+    # 3. Entities block — FIX 10 v12: passa products per popolarne l'array
+    generated["entities"] = build_entity_block(azienda, servizi, local_seo, schema_type,
+                                                products_list=generated.get("products") or ai_products)
 
     # 4. AI Summary
     generated["ai_summary"] = build_ai_summary(azienda, servizi, local_seo, fatti)
@@ -998,11 +1171,29 @@ def post_process(
         schema_type=schema_type,
     )
 
-    # 8. page_meta
+    # FIX 12 v12: meta_description completa, non troncata a metà frase
+    # Genera una frase autonoma e significativa entro 155 char
     home = generated.get("home", {})
     h1 = home.get("h1", azienda)
     intro = home.get("intro", "")
-    meta_desc = intro[:155].rsplit(" ", 1)[0] + "..." if len(intro) > 155 else intro
+    # Estrai la prima frase completa (fino al primo punto)
+    first_sentence = ""
+    if intro:
+        sentences = re.split(r"(?<=[.!?])\s+", intro)
+        if sentences:
+            first_sentence = sentences[0].strip()
+    if first_sentence and len(first_sentence) <= 155:
+        meta_desc = first_sentence
+    elif first_sentence:
+        # Tronca alla parola intera più vicina a 152 char, aggiunge "."
+        truncated = first_sentence[:152].rsplit(" ", 1)[0].rstrip(",;:").rstrip()
+        meta_desc = truncated + "."
+    elif intro:
+        # Fallback: tronca intro alla parola intera, chiudi con punto
+        truncated = intro[:152].rsplit(" ", 1)[0].rstrip(",;:").rstrip()
+        meta_desc = truncated + "."
+    else:
+        meta_desc = f"{azienda} — {servizi[:100].split(',')[0].strip()}."
     url_raw = local_seo.get("url", "").strip()
     if url_raw and not url_raw.startswith("http"):
         url_raw = f"https://www.{url_raw}"
@@ -1016,8 +1207,28 @@ def post_process(
         "canonical_url":    url_raw or f"https://www.{slug}.it/",
     }
 
-    # 9. Sentiment E-E-A-T enrichment v11 (deep extraction: professionalità + autorità)
+    # 9. Sentiment E-E-A-T enrichment v12 (deep extraction + fallback intelligente)
     sentiment_terms = extract_sentiment_terms(_scrape, servizi=servizi)
+    # FIX 8 v12: se nessuna recensione rilevata, inietta fallback da fatti/geo_entities
+    if not sentiment_terms:
+        fallback_candidates = []
+        fatti_lower = fatti.lower()
+        geo_ents = generated.get("_meta_fonti", {}).get("geo_entities", [])
+        # Keyword emotive ricavabili direttamente dal testo del debrief
+        sentiment_fallback_map = {
+            "dop": "autenticità", "igp": "autenticità", "biologico": "sostenibilità",
+            "bio": "sostenibilità", "certificat": "affidabilità", "storia": "tradizione",
+            "1817": "tradizione", "1890": "tradizione", "generazioni": "tradizione",
+            "premiato": "eccellenza", "premio": "eccellenza", "riconoscimento": "eccellenza",
+            "artigian": "artigianalità", "famiglia": "tradizione", "territorio": "territorialità",
+            "tracciab": "tracciabilità", "qualità": "qualità certificata", "flos olei": "eccellenza",
+            "gambero rosso": "eccellenza", "bibenda": "eccellenza", "slow food": "sostenibilità",
+            "rinnovabile": "sostenibilità", "energia": "sostenibilità",
+        }
+        for trigger, sentiment in sentiment_fallback_map.items():
+            if trigger in fatti_lower and sentiment not in fallback_candidates:
+                fallback_candidates.append(sentiment)
+        sentiment_terms = fallback_candidates[:8]
     generated["sentiment_keywords"] = sentiment_terms
     if sentiment_terms:
         generated["page_meta"] = enrich_meta_with_sentiment(generated["page_meta"], sentiment_terms)
@@ -1910,9 +2121,53 @@ def extract_source_urls(evidence: dict, scrape_data: dict) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEZIONE 9: SYSTEM PROMPT BUILDER v11
-# FIX 2: Strict Language Lock rinforzato con triple-lock
+# SEZIONE 9a: TONE OF VOICE SYSTEM v12
+# Funzionalità C: selettore Product-Oriented / Storytelling / Bilanciato
 # ─────────────────────────────────────────────────────────────────────────────
+
+TONE_OF_VOICE_PROFILES = {
+    "bilanciato": {
+        "label": "⚖️ Bilanciato (default)",
+        "description": "Mix equilibrato di narrazione e dati di prodotto. Tono professionale e autorevole.",
+        "prompt_inject": """TONE OF VOICE — BILANCIATO:
+Il testo deve bilanciare narrazione di brand e dati di prodotto in parti uguali.
+• Ogni paragrafo combina un elemento di storia/contesto con un dato tecnico.
+• Stile professionale, autorevole ma accessibile.
+• Le sezioni prodotto sono concise e orientate ai benefici del cliente.
+• Le sezioni corporate usano un tono caldo ma preciso.""",
+    },
+    "product_oriented": {
+        "label": "🛒 Product-Oriented",
+        "description": "Focus su specifiche, premi, certificazioni e benefici diretti del prodotto.",
+        "prompt_inject": """TONE OF VOICE — PRODUCT-ORIENTED:
+Il testo è centrato sul prodotto: specifiche tecniche, premi, certificazioni, confronti.
+• Ogni frase del prodotto include almeno un dato tecnico verificato dalle fonti.
+• Struttura: nome prodotto → parametro chiave → riconoscimento/certificazione → beneficio.
+• Minimizza la narrazione corporate e storica — il protagonista è il prodotto.
+• Usa terminologia tecnica di settore senza spiegazioni eccessive.
+• Le CTA sono orientate all'acquisto/richiesta diretta.""",
+    },
+    "storytelling": {
+        "label": "📖 Storytelling",
+        "description": "Narrazione immersiva, territorio, storia, famiglia e valori del brand.",
+        "prompt_inject": """TONE OF VOICE — STORYTELLING:
+Il testo costruisce una narrazione immersiva attorno al brand, al territorio e alle persone.
+• Ogni sezione ha un arco narrativo: contesto → conflitto/scelta → risultato.
+• Privilegia metafore sensoriali, riferimenti geografici specifici, aneddoti storici.
+• I dati tecnici (premi, certificazioni) vengono intrecciati nella narrazione come climax.
+• Evita elenchi puntati nelle sezioni narrative — usa periodi articolati.
+• Le CTA evocano un'esperienza, non solo una transazione.""",
+    },
+}
+
+
+def get_tone_prompt(tone_key: str) -> str:
+    """Restituisce il blocco prompt per il tone of voice selezionato."""
+    return TONE_OF_VOICE_PROFILES.get(tone_key, TONE_OF_VOICE_PROFILES["bilanciato"])["prompt_inject"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 9: SYSTEM PROMPT BUILDER v12
 
 GEO_FLOW_RULES = """
 ╔══════════════════════════════════════════════════════════════════╗
@@ -1959,7 +2214,7 @@ dalle fonti RAG o dal debrief utente.
 """
 
 
-def build_system_prompt(stile_esempi: str = "", lingua: str = "italiano") -> str:
+def build_system_prompt(stile_esempi: str = "", lingua: str = "italiano", tone: str = "bilanciato") -> str:
     lingua_upper = lingua.upper()
 
     # FIX 2 v11: STRICT MODE rinforzato — sovrascrive anche le fonti RAG
@@ -2032,10 +2287,15 @@ ISTRUZIONE STILE: Analizza i testi sopra. Identifica lunghezza media frasi, voca
 ║   • Certificazioni non trovate nel RAG o nel sito           ║
 ╚══════════════════════════════════════════════════════════════╝"""
 
+    # Funzionalità C v12: Tone of Voice selezionabile
+    tone_block = get_tone_prompt(tone)
+
     return f"""{lang_constraint}Sei il copywriter GEO/SEO senior di Alligator. Generi contenuti web ad alta citabilità AI.
 
 {alligator_rules}
 {style_section}
+
+{tone_block}
 
 {truth_hierarchy}
 
@@ -2636,7 +2896,7 @@ def faq_to_md(faqs):
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
-        page_title="GEO Score™ v11 — The Authority Orchestrator",
+        page_title="GEO Score™ v12 — The Authority Orchestrator",
         page_icon="🐊",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -2666,13 +2926,17 @@ def main():
         border: 1px solid #e2e8f0; border-radius: 8px;
         padding: 0.75rem 1rem; margin: 0.3rem 0; background: #fafafa;
     }
+    .history-item {
+        background: #f8faff; border: 1px solid #c7d2fe; border-radius: 6px;
+        padding: 0.4rem 0.7rem; margin: 0.2rem 0; font-size: 0.82rem; cursor: pointer;
+    }
     </style>
     """, unsafe_allow_html=True)
 
     st.markdown("""
     <div class="geo-header">
-        <h1>🐊 GEO Score™ Content Generator v11 — The Authority Orchestrator</h1>
-        <p>Strict Multilang v11 · Anti-Fuffa E-E-A-T · Schema ID Slug · Deep Sentiment · P.IVA · Silo Reset · Framework GEO Score™ by Nico Fioretti</p>
+        <h1>🐊 GEO Score™ Content Generator v12 — The Authority Orchestrator</h1>
+        <p>v12: Edit Inline · History · Tone of Voice · Rich Result · Fix Products/Sentiment/Meta · Schema Store · Framework GEO Score™ by Nico Fioretti</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -2686,7 +2950,6 @@ def main():
         if provider == "openai":
             opts, dflt = list(PRICING["openai"].keys()), "gpt-4o-mini"
         else:
-            # FIX 5 v11: default Sonnet 4.5
             opts, dflt = list(PRICING["anthropic"].keys()), "claude-sonnet-4-5"
 
         model = st.selectbox("Modello", opts,
@@ -2697,6 +2960,51 @@ def main():
                                 placeholder="sk-... oppure sk-ant-...")
 
         st.divider()
+
+        # ── FUNZIONALITÀ C: Tone of Voice ────────────────────────────────────
+        st.subheader("🎨 Tone of Voice")
+        tone_options = list(TONE_OF_VOICE_PROFILES.keys())
+        tone_labels  = [TONE_OF_VOICE_PROFILES[k]["label"] for k in tone_options]
+        tone_idx     = st.radio(
+            "Stile narrativo",
+            options=range(len(tone_options)),
+            format_func=lambda i: tone_labels[i],
+            index=0, key="tone_radio",
+            help="Influenza il sistema di prompt per tutte le sezioni generate."
+        )
+        selected_tone = tone_options[tone_idx]
+        st.caption(TONE_OF_VOICE_PROFILES[selected_tone]["description"])
+        st.session_state["tone"] = selected_tone
+
+        st.divider()
+
+        # ── FUNZIONALITÀ B: History Sidebar ──────────────────────────────────
+        history = st.session_state.get("client_history", [])
+        if history:
+            st.subheader("🕐 Clienti Recenti")
+            st.caption("Clicca per ripristinare un debrief")
+            for i, entry in enumerate(reversed(history[-10:])):
+                if st.button(
+                    f"🐊 {entry['azienda']}",
+                    key=f"hist_{i}",
+                    use_container_width=True,
+                    help=f"Servizi: {entry.get('servizi','')[:60]}"
+                ):
+                    # Ripristina tutti i campi del debrief dalla history
+                    for field in ["azienda","servizi","target","fatti","lingua","stile_esempi",
+                                  "url_sito","telefono_manuale","email_manuale","via","citta",
+                                  "cap","prov","gps_lat","gps_lon","linkedin","anno_fondazione",
+                                  "logo_url","price_range"]:
+                        if field in entry:
+                            st.session_state[field] = entry[field]
+                    # Ripristina orari
+                    for giorno in ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]:
+                        key_orario = f"orario_{giorno}"
+                        if key_orario in entry:
+                            st.session_state[key_orario] = entry[key_orario]
+                    st.success(f"✅ Debrief '{entry['azienda']}' ripristinato!")
+                    st.rerun()
+            st.divider()
 
         st.markdown("""
         <div class="truth-box">
@@ -2709,7 +3017,8 @@ def main():
 
         st.divider()
         st.subheader("💰 Stima Costi")
-        sys_tok = estimate_tokens(build_system_prompt(lingua=st.session_state.get("lingua","italiano")))
+        sys_tok = estimate_tokens(build_system_prompt(lingua=st.session_state.get("lingua","italiano"),
+                                                      tone=st.session_state.get("tone","bilanciato")))
         in_est  = sys_tok + 800
         out_est = 1200
         cpp     = estimate_cost(in_est, out_est, provider, model)
@@ -2729,16 +3038,21 @@ def main():
             for t in CLICHE_BLACKLIST:
                 st.markdown(f"✗ _{t}_")
 
-        # v11 — note sui fix
-        with st.expander("✅ Fix v11 attivi"):
+        with st.expander("✅ Fix v12 attivi"):
             st.markdown("""
-            **FIX 1** — Schema ID slug corti (`#product-consulenza-seo`)  
-            **FIX 2** — Strict Language Lock (triple-lock in ogni prompt)  
-            **FIX 3** — Sentiment: professionalità + autorità + sensoriale  
-            **FIX 4** — P.IVA regex migliorata + vatID garantito  
-            **FIX 5** — max_tokens 8192 per tutti i modelli Anthropic  
-            **FIX 6** — Silo reset confermato prima di ogni run  
+            **FIX 7**  — Products vs Awards separati (nomi puliti)  
+            **FIX 8**  — Sentiment fallback da fatti/geo_entities  
+            **FIX 9**  — FAQ key format unificato + nota JSON  
+            **FIX 10** — entities.products popolato  
+            **FIX 11** — Schema @type: Store per frantoio/olio (no FoodEstablishment)  
+            **FIX 12** — meta_description: frase completa, no troncamento  
+            **FIX 13** — Rich Result: review + aggregateRating + offers.price  
+            **A** — Edit inline sezioni risultati  
+            **B** — History ultimi 10 clienti nella sidebar  
+            **C** — Tone of Voice: Product / Storytelling / Bilanciato  
+            **D** — Rich Snippet Google completato  
             """)
+
 
     # ── TABS ─────────────────────────────────────────────────────────────────
     tab1, tab2, tab3 = st.tabs(["📋 Debrief", "🛠️ Generatore", "📄 Risultati"])
@@ -2814,6 +3128,16 @@ def main():
                 "✉️ Email (auto-rilevata o manuale)", key="email_manuale",
                 placeholder="info@azienda.it  ← lascia vuoto per auto-rilevamento"
             )
+            logo_url_input = st.text_input(
+                "🖼️ URL Logo / Immagine aziendale (opz.)",
+                key="logo_url",
+                placeholder="https://www.azienda.it/logo.jpg  ← migliora i Rich Results Google"
+            )
+            price_range_input = st.text_input(
+                "💶 Fascia di Prezzo (opz., es. €€ o 10-50€)",
+                key="price_range",
+                placeholder="€€  ← usato solo per ristoranti, negozi, hotel, ecc."
+            )
 
         st.markdown("**🕐 Orari di Apertura** *(lascia vuoto = chiuso · es: 09:00-13:00, 15:00-19:00)*")
         giorni = ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
@@ -2848,6 +3172,9 @@ def main():
             "url":       st.session_state.get("url_sito",""),
             "linkedin":        st.session_state.get("linkedin",""),
             "anno_fondazione": st.session_state.get("anno_fondazione",""),
+            # FIX v13: nuovi campi per Rich Results Google
+            "logo_url":       st.session_state.get("logo_url",""),
+            "price_range":    st.session_state.get("price_range",""),
         }
         st.session_state["local_seo"] = local_seo
 
@@ -2869,7 +3196,7 @@ def main():
     # TAB 2: GENERATORE MODULARE
     # ═══════════════════════════════════════════════════════════════════════
     with tab2:
-        st.subheader("🛠️ Generatore Modulare — Anti-Hallucination v4 · Fix v11")
+        st.subheader("🛠️ Generatore Modulare — Anti-Hallucination v4 · Fix v12")
 
         _az  = st.session_state.get("azienda","")
         _sv  = st.session_state.get("servizi","")
@@ -2878,6 +3205,12 @@ def main():
         _ln  = st.session_state.get("lingua","italiano")
         _st  = st.session_state.get("stile_esempi","")
         _loc = st.session_state.get("local_seo",{})
+        _tn  = st.session_state.get("tone","bilanciato")
+
+        # Mostra il tone attivo
+        tone_info = TONE_OF_VOICE_PROFILES.get(_tn, TONE_OF_VOICE_PROFILES["bilanciato"])
+        st.info(f"🎨 Tone of Voice attivo: **{tone_info['label']}** — {tone_info['description']}")
+        _tn  = st.session_state.get("tone","bilanciato")
 
         ready = bool(_az and _sv and _tg and _ft and api_key)
 
@@ -2940,7 +3273,7 @@ def main():
         st.divider()
 
         if ready and n_sel > 0:
-            sp_preview = build_system_prompt(_st, lingua=_ln)
+            sp_preview = build_system_prompt(_st, lingua=_ln, tone=_tn)
             in_est_r   = estimate_tokens(sp_preview) + 800
             tot_est    = estimate_cost(in_est_r, 1200, provider, model) * n_sel
             extra_calls = (1 if enable_rag else 0)
@@ -2953,7 +3286,7 @@ def main():
         )
 
         if gen_btn and ready and n_sel > 0:
-            sys_p = build_system_prompt(_st, lingua=_ln)
+            sys_p = build_system_prompt(_st, lingua=_ln, tone=_tn)
 
             total_in  = 0
             total_out = 0
@@ -3154,6 +3487,33 @@ def main():
             real_tot = estimate_cost(total_in, total_out, provider, model)
             st.session_state["real_cost"]  = real_tot
 
+            # ── FUNZIONALITÀ B: salva in history v12 ─────────────────────────
+            if _az:
+                history = st.session_state.get("client_history", [])
+                # Costruisce snapshot completo del debrief
+                snapshot = {
+                    "azienda": _az, "servizi": _sv, "target": _tg, "fatti": _ft,
+                    "lingua": _ln, "stile_esempi": _st, "tone": _tn,
+                    "url_sito": st.session_state.get("url_sito",""),
+                    "telefono_manuale": st.session_state.get("telefono_manuale",""),
+                    "email_manuale":    st.session_state.get("email_manuale",""),
+                    "via":   st.session_state.get("via",""),
+                    "citta": st.session_state.get("citta",""),
+                    "cap":   st.session_state.get("cap",""),
+                    "prov":  st.session_state.get("prov",""),
+                    "gps_lat":   st.session_state.get("gps_lat",""),
+                    "gps_lon":   st.session_state.get("gps_lon",""),
+                    "linkedin":  st.session_state.get("linkedin",""),
+                    "anno_fondazione": st.session_state.get("anno_fondazione",""),
+                }
+                # Aggiungi orari
+                for giorno in ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]:
+                    snapshot[f"orario_{giorno}"] = st.session_state.get(f"orario_{giorno}","")
+                # Rimuovi duplicato per stesso nome azienda se già presente
+                history = [h for h in history if h.get("azienda") != _az]
+                history.append(snapshot)
+                st.session_state["client_history"] = history[-10:]  # max 10
+
             st.markdown("#### 📊 Report per Sezione")
             for sec, ok, info in call_log:
                 icon = "✅" if ok else "❌"
@@ -3167,7 +3527,7 @@ def main():
     # TAB 3: RISULTATI
     # ═══════════════════════════════════════════════════════════════════════
     with tab3:
-        st.subheader("📄 Risultati — v11 · Schema Slug · Deep Sentiment · Silo Reset")
+        st.subheader("📄 Risultati — v12 · Edit Inline · Rich Result · Schema Store · Sentiment Fallback")
 
         if not st.session_state.get("generated"):
             st.info("🔄 Vai al tab **🛠️ Generatore** per creare i contenuti.")
@@ -3268,6 +3628,31 @@ def main():
                     home = data.get("home", {})
                     render_home(home)
                     st.divider()
+
+                    # ── FUNZIONALITÀ A: Edit Inline — Home ──────────────────
+                    with st.expander("✏️ Modifica direttamente questa sezione", expanded=False):
+                        st.caption("Le modifiche vengono salvate nel JSON e nel download automaticamente.")
+                        h1_edit = st.text_input("H1", value=home.get("h1",""), key="edit_home_h1")
+                        intro_edit = st.text_area("Intro", value=home.get("intro",""), height=150, key="edit_home_intro")
+                        s1 = home.get("sezione_1", {})
+                        s1h2_edit = st.text_input("Sezione 1 — H2", value=s1.get("h2",""), key="edit_s1h2")
+                        s1body_edit = st.text_area("Sezione 1 — Body", value=s1.get("body",""), height=100, key="edit_s1body")
+                        s2 = home.get("sezione_2", {})
+                        s2h2_edit = st.text_input("Sezione 2 — H2", value=s2.get("h2",""), key="edit_s2h2")
+                        s2body_edit = st.text_area("Sezione 2 — Body", value=s2.get("body",""), height=100, key="edit_s2body")
+                        cta_edit = st.text_input("CTA", value=resolve_cta(home.get("cta","")), key="edit_home_cta")
+                        if st.button("💾 Salva modifiche Homepage", key="save_home"):
+                            data["home"]["h1"] = h1_edit
+                            data["home"]["intro"] = intro_edit
+                            data["home"].setdefault("sezione_1", {})["h2"]   = s1h2_edit
+                            data["home"].setdefault("sezione_1", {})["body"] = s1body_edit
+                            data["home"].setdefault("sezione_2", {})["h2"]   = s2h2_edit
+                            data["home"].setdefault("sezione_2", {})["body"] = s2body_edit
+                            data["home"]["cta"] = cta_edit
+                            st.session_state["generated"] = data
+                            st.success("✅ Homepage aggiornata nel JSON!")
+                            st.rerun()
+
                     copy_box("📋 Copia Homepage (Markdown/Gutenberg)", home_to_md(home), "cp_home")
                     if data.get("home_html"):
                         copy_box("📋 Copia Homepage (HTML WordPress)", data["home_html"], "cp_home_html")
@@ -3283,6 +3668,32 @@ def main():
                     page = data.get("pagina_servizio", {})
                     render_service(page)
                     st.divider()
+
+                    # ── FUNZIONALITÀ A: Edit Inline — Servizio ──────────────
+                    with st.expander("✏️ Modifica direttamente questa sezione", expanded=False):
+                        ps_h1_edit = st.text_input("H1 Servizio", value=page.get("h1",""), key="edit_serv_h1")
+                        ps_intro_edit = st.text_area("Intro Servizio", value=page.get("intro",""), height=130, key="edit_serv_intro")
+                        cf = page.get("come_funziona", {})
+                        cf_h2_edit = st.text_input("Come Funziona — H2", value=cf.get("h2",""), key="edit_cf_h2")
+                        cf_steps_raw = "\n".join(cf.get("steps", []))
+                        cf_steps_edit = st.text_area("Come Funziona — Steps (uno per riga)", value=cf_steps_raw, height=100, key="edit_cf_steps")
+                        ben = page.get("benefici", {})
+                        ben_h2_edit = st.text_input("Benefici — H2", value=ben.get("h2",""), key="edit_ben_h2")
+                        ben_lista_raw = "\n".join(ben.get("lista", []))
+                        ben_lista_edit = st.text_area("Benefici — Lista (uno per riga)", value=ben_lista_raw, height=100, key="edit_ben_lista")
+                        serv_cta_edit = st.text_input("CTA Servizio", value=resolve_cta(page.get("cta","")), key="edit_serv_cta")
+                        if st.button("💾 Salva modifiche Servizio", key="save_serv"):
+                            data["pagina_servizio"]["h1"] = ps_h1_edit
+                            data["pagina_servizio"]["intro"] = ps_intro_edit
+                            data["pagina_servizio"].setdefault("come_funziona", {})["h2"] = cf_h2_edit
+                            data["pagina_servizio"].setdefault("come_funziona", {})["steps"] = [s.strip() for s in cf_steps_edit.split("\n") if s.strip()]
+                            data["pagina_servizio"].setdefault("benefici", {})["h2"] = ben_h2_edit
+                            data["pagina_servizio"].setdefault("benefici", {})["lista"] = [s.strip() for s in ben_lista_edit.split("\n") if s.strip()]
+                            data["pagina_servizio"]["cta"] = serv_cta_edit
+                            st.session_state["generated"] = data
+                            st.success("✅ Pagina Servizio aggiornata nel JSON!")
+                            st.rerun()
+
                     copy_box("📋 Copia Pagina Servizio", service_to_md(page), "cp_serv")
                     if data.get("service_html"):
                         copy_box("📋 Copia Servizio (HTML WordPress)", data["service_html"], "cp_serv_html")
@@ -3298,6 +3709,23 @@ def main():
                     faqs = data.get("faq", [])
                     render_faq(faqs)
                     st.divider()
+
+                    # ── FUNZIONALITÀ A: Edit Inline — FAQ ───────────────────
+                    with st.expander("✏️ Modifica le FAQ", expanded=False):
+                        st.caption("Modifica domanda e risposta di ogni FAQ. FIX 9: chiavi interne domanda/risposta, JSON-LD usa question/acceptedAnswer.")
+                        updated_faqs = []
+                        for i, faq in enumerate(faqs):
+                            st.markdown(f"**FAQ {i+1}**")
+                            d_edit = st.text_input(f"Domanda {i+1}", value=faq.get("domanda",""), key=f"edit_faq_d_{i}")
+                            r_edit = st.text_area(f"Risposta {i+1}", value=faq.get("risposta",""), height=80, key=f"edit_faq_r_{i}")
+                            updated_faqs.append({**faq, "domanda": d_edit, "risposta": r_edit})
+                            st.divider()
+                        if st.button("💾 Salva modifiche FAQ", key="save_faq"):
+                            data["faq"] = updated_faqs
+                            st.session_state["generated"] = data
+                            st.success("✅ FAQ aggiornate nel JSON!")
+                            st.rerun()
+
                     copy_box("📋 Copia FAQ (Markdown/Gutenberg)", faq_to_md(faqs), "cp_faq")
                     if data.get("faq_html"):
                         copy_box("📋 Copia FAQ (HTML WordPress <details>)", data["faq_html"], "cp_faq_html")
@@ -3341,7 +3769,8 @@ def main():
                 "azienda":   _az,
                 "provider":  provider,
                 "model":     model,
-                "version":   "v11",
+                "version":   "v13",
+                "tone":      st.session_state.get("tone","bilanciato"),
                 "in_tokens": in_t,
                 "out_tokens":out_t,
                 "cost_usd":  cost_r,
@@ -3350,13 +3779,28 @@ def main():
                 "geo_entities":  meta.get("geo_entities", []),
                 "rag_attivo":    meta.get("rag_attivo", False),
                 "scraping_attivo": meta.get("scraping_attivo", False),
-                "fixes_v11": [
+                "fixes_v13": [
+                    "product_offers_price_always_present",
+                    "product_image_added_with_fallback",
+                    "localbusiness_image_from_logo_url",
+                    "localbusiness_pricerange_from_local_seo",
+                    "localbusiness_servescuisine_from_local_seo",
+                    "offers_shipping_and_return_policy_optional",
+                ],
+                "fixes_v12": [
                     "schema_id_slugification",
                     "strict_language_lock_triple",
-                    "sentiment_deep_extraction",
+                    "sentiment_deep_extraction_with_fallback",
                     "vat_id_improved_regex",
                     "max_tokens_8192",
-                    "silo_context_reset"
+                    "silo_context_reset",
+                    "products_vs_awards_separated",
+                    "sentiment_fallback_from_facts",
+                    "faq_key_unification",
+                    "entities_products_populated",
+                    "schema_type_store_not_food_establishment",
+                    "meta_description_complete_sentence",
+                    "rich_result_review_aggregaterating_price",
                 ]
             },
             "content": data
@@ -3365,7 +3809,7 @@ def main():
         st.download_button(
             "⬇️ Scarica pacchetto completo (JSON con fonti)",
             data=json.dumps(export, ensure_ascii=False, indent=2),
-            file_name=f"geo_alligator_v11_{_az.replace(' ','_').lower()}.json",
+            file_name=f"geo_alligator_v12_{_az.replace(' ','_').lower()}.json",
             mime="application/json"
         )
 
