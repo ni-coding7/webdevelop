@@ -2372,6 +2372,9 @@ def call_anthropic(api_key: str, model: str, system: str, user: str) -> tuple:
         # FIX 5 v11: max_tokens sempre da MODEL_MAX_TOKENS, minimo 8192 per Anthropic
         max_tok = MODEL_MAX_TOKENS.get(model, 8192)
         max_tok = max(max_tok, 8192)  # mai sotto 8192 per i modelli Anthropic
+        # NOTA: il parametro `temperature` è deprecato per i modelli Claude 4.x
+        # (Opus 4.7, Sonnet 4.6, Haiku 4.5) e produce 400 invalid_request_error.
+        # È stato rimosso: il modello gestisce internamente la randomness.
         resp    = client.messages.create(
             model=model,
             max_tokens=max_tok,
@@ -2379,8 +2382,7 @@ def call_anthropic(api_key: str, model: str, system: str, user: str) -> tuple:
             messages=[
                 {"role": "user",      "content": user},
                 {"role": "assistant", "content": "{"}  # Prefill: forza JSON, elimina preamble
-            ],
-            temperature=0.4
+            ]
         )
         content = "{" + resp.content[0].text
         return content, resp.usage.input_tokens, resp.usage.output_tokens
