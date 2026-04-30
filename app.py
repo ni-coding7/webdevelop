@@ -38,7 +38,7 @@ FIX 4 — P.IVA REGEX MIGLIORATA + vatID IN ORGANIZATION
 
 FIX 5 — GESTIONE MODELLI E MAX_TOKENS
   • MODEL_MAX_TOKENS: tutti i modelli Anthropic a 8192 (default sicuro).
-  • Sidebar: model selector ora mostra claude-sonnet-4-6 come default.
+  • Sidebar: model selector ora mostra claude-sonnet-4-5 come default.
   • call_anthropic() usa sempre il max_tokens dal dizionario (no fallback a 4000).
   • Aggiunto controllo esplicito che max_tok >= 4096 per Anthropic.
 
@@ -201,15 +201,15 @@ PRICING = {
     },
     "anthropic": {
         "claude-haiku-4-5-20251001":  {"input": 0.00100, "output": 0.00500},
-        "claude-sonnet-4-6": {"input": 0.00300, "output": 0.01500},
-        "claude-opus-4-7":     {"input": 0.01500, "output": 0.07500},
+        "claude-sonnet-4-5": {"input": 0.00300, "output": 0.01500},
+        "claude-opus-4-5":     {"input": 0.01500, "output": 0.07500},
     }
 }
 
 MODEL_LABELS = {
     "claude-haiku-4-5-20251001":  "Claude 4.5 Haiku 💰 (Economico)",
-    "claude-sonnet-4-6": "Claude 4.6 Sonnet 🔋 (Raccomandato per GEO)",
-    "claude-opus-4-7":     "Claude 4.7 Opus 💎 (Massima qualità)",
+    "claude-sonnet-4-5": "Claude 4.5 Sonnet 🔋 (Raccomandato per GEO)",
+    "claude-opus-4-5":     "Claude 4.5 Opus 💎 (Massima qualità)",
     "gpt-4o-mini":                "GPT-4o Mini 💰",
     "gpt-4o":                     "GPT-4o 🔋",
 }
@@ -219,8 +219,8 @@ MODEL_MAX_TOKENS = {
     "gpt-4o-mini":               4096,
     "gpt-4o":                    4096,
     "claude-haiku-4-5-20251001": 8192,
-    "claude-sonnet-4-6":         8192,
-    "claude-opus-4-7":           8192,
+    "claude-sonnet-4-5":         8192,
+    "claude-opus-4-5":           8192,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2686,8 +2686,8 @@ def main():
         if provider == "openai":
             opts, dflt = list(PRICING["openai"].keys()), "gpt-4o-mini"
         else:
-            # FIX 5 v11: default Sonnet 4.6
-            opts, dflt = list(PRICING["anthropic"].keys()), "claude-sonnet-4-6"
+            # FIX 5 v11: default Sonnet 4.5
+            opts, dflt = list(PRICING["anthropic"].keys()), "claude-sonnet-4-5"
 
         model = st.selectbox("Modello", opts,
                              index=opts.index(dflt) if dflt in opts else 0,
