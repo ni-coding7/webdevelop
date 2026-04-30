@@ -2,7 +2,7 @@
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║     GEO Score™ Content Generator v11 — Alligator Edition                   ║
 ║     The Authority Orchestrator: Strict Multilang · Anti-Fuffa E-E-A-T      ║
-║      · Silo v11 · Product Schema · P.IVA · SocialHub ║
+║     Geocodifica Resiliente · Silo v11 · Product Schema · P.IVA · SocialHub ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 CHANGELOG v11 — 6 FIX STRUTTURALI:
