@@ -1116,14 +1116,26 @@ def post_process(
         if section and isinstance(section.get("cta"), str):
             section["cta"] = build_structured_cta(section["cta"], stype)
 
-    # 3. Entities block — FIX 10 v12: passa products per popolarne l'array
+    # 3. Products — anticipato rispetto a Entities (FIX UnboundLocalError v13)
+    #    ai_products deve essere definita PRIMA che venga usata in build_entity_block
+    ai_products = (
+        generated.get("prodotti")
+        or generated.get("products")
+        or build_products_from_fatti(fatti, azienda)
+    )
+    if not ai_products and servizi:
+        ai_products = build_service_products(servizi, azienda)
+    if ai_products:
+        generated["products"] = ai_products
+
+    # 4. Entities block — FIX 10 v12: passa products per popolarne l'array
     generated["entities"] = build_entity_block(azienda, servizi, local_seo, schema_type,
                                                 products_list=generated.get("products") or ai_products)
 
-    # 4. AI Summary
+    # 5. AI Summary
     generated["ai_summary"] = build_ai_summary(azienda, servizi, local_seo, fatti)
 
-    # 5. sameAs + P.IVA + Social Hub
+    # 6. sameAs + P.IVA + Social Hub
     vat_id = extract_vat_id(_scrape)
     if vat_id and not local_seo.get("vat_id", "").strip():
         local_seo["vat_id"] = vat_id
@@ -1131,7 +1143,7 @@ def post_process(
     scraped_socials = extract_social_urls(_scrape)
     same_as = build_same_as(local_seo, extra_socials=scraped_socials)
 
-    # 5b. Awards dai fatti
+    # 6b. Awards dai fatti
     award_patterns = [
         r"\b(?:premio|premiato|vincitore|vince|medaglia|corona|stella|foglie?|gocce?|"
         r"riconoscimento|award|best|first place|oro|argento|bronzo|"
@@ -1143,17 +1155,6 @@ def post_process(
         line = line.strip().strip("·•-")
         if line and any(re.search(p, line, re.IGNORECASE) for p in award_patterns):
             awards_found.append(line)
-
-    # 6. Products
-    ai_products = (
-        generated.get("prodotti")
-        or generated.get("products")
-        or build_products_from_fatti(fatti, azienda)
-    )
-    if not ai_products and servizi:
-        ai_products = build_service_products(servizi, azienda)
-    if ai_products:
-        generated["products"] = ai_products
 
     # 7. FAQ
     faq_data = generated.get("faq", [])
