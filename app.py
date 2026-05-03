@@ -117,10 +117,34 @@ CHANGELOG v10 (mantenuto integralmente):
 
 import streamlit as st
 import json
+import os
 import re
 import time
 from typing import Optional
 from urllib.parse import urljoin, urlparse
+
+HISTORY_FILE = "clienti_history.json"
+
+
+def load_history() -> list:
+    """Carica lo storico clienti da disco. Ritorna [] se il file non esiste."""
+    try:
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+
+def save_history(history: list) -> None:
+    """Salva lo storico clienti su disco (max 50 clienti)."""
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history[-50:], f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 1: GEO CRITERIA CONSTANT
@@ -200,6 +224,7 @@ GEO_ENTITY_MAP = {
         "DOCG Fiano di Avellino", "IGT Campania"
     ],
     "calabria": [
+        
         "DOP Bruzio", "DOP Lamezia", "DOP Sotto il Monte",
         "DOP Alto Crotonese", "DOP Esaro", "DOP Sibaritide", "IGP Calabria"
     ],
@@ -258,27 +283,27 @@ PRICING = {
         "gpt-4o":       {"input": 0.00250, "output": 0.01000},
     },
     "anthropic": {
-        "claude-haiku-4-5-20251001":  {"input": 0.00100, "output": 0.00500},
-        "claude-sonnet-4-5": {"input": 0.00300, "output": 0.01500},
-        "claude-opus-4-5":     {"input": 0.01500, "output": 0.07500},
+        "claude-haiku-4-5":  {"input": 0.00100, "output": 0.00500},
+        "claude-sonnet-4-6": {"input": 0.00300, "output": 0.01500},
+        "claude-opus-4-6":   {"input": 0.01500, "output": 0.07500},
     }
 }
 
 MODEL_LABELS = {
-    "claude-haiku-4-5-20251001":  "Claude 4.5 Haiku 💰 (Economico)",
-    "claude-sonnet-4-5": "Claude 4.5 Sonnet 🔋 (Raccomandato per GEO)",
-    "claude-opus-4-5":     "Claude 4.5 Opus 💎 (Massima qualità)",
-    "gpt-4o-mini":                "GPT-4o Mini 💰",
-    "gpt-4o":                     "GPT-4o 🔋",
+    "claude-haiku-4-5":  "Claude Haiku 4.5 💰 (Economico)",
+    "claude-sonnet-4-6": "Claude Sonnet 4.6 🔋 (Raccomandato per GEO)",
+    "claude-opus-4-6":   "Claude Opus 4.6 💎 (Massima qualità)",
+    "gpt-4o-mini":       "GPT-4o Mini 💰",
+    "gpt-4o":            "GPT-4o 🔋",
 }
 
 # FIX 5 v11: 8192 per tutti i modelli Anthropic — nessun troncamento JSON
 MODEL_MAX_TOKENS = {
-    "gpt-4o-mini":               4096,
-    "gpt-4o":                    4096,
-    "claude-haiku-4-5-20251001": 8192,
-    "claude-sonnet-4-5":         8192,
-    "claude-opus-4-5":           8192,
+    "gpt-4o-mini":       4096,
+    "gpt-4o":            4096,
+    "claude-haiku-4-5":  8192,
+    "claude-sonnet-4-6": 8192,
+    "claude-opus-4-6":   8192,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -513,7 +538,15 @@ def compute_quality_score(data: dict, local_seo: dict, source_urls: list) -> dic
         risk = "medium"
     else:
         risk = "low"
-    return {"eeat": eeat, "seo": seo, "geo": geo, "risk_level": risk}
+    # Modulo 4 v14: AI-Ready score — misura ottimizzazione per AI generative
+    ai_ready = 0
+    if data.get("answer_first_page"):               ai_ready += 3
+    if data.get("citation_block"):                   ai_ready += 3
+    if data.get("offsite_geo_plan"):                 ai_ready += 2
+    if data.get("ai_summary"):                       ai_ready += 1
+    if meta.get("rag_attivo"):                       ai_ready += 1
+    ai_ready = min(10, max(0, ai_ready))
+    return {"eeat": eeat, "seo": seo, "geo": geo, "ai_ready": ai_ready, "risk_level": risk}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1058,27 +1091,55 @@ def build_schema_markup(
 # SEZIONE 6h: AI SUMMARY BUILDER
 # ─────────────────────────────────────────────────────────────────────────────
 def build_ai_summary(azienda: str, servizi: str, local_seo: dict, fatti: str) -> str:
+    """
+    Genera ai_summary ottimizzato per citabilità da AI (ChatGPT, Perplexity, Google SGE).
+
+    Struttura GEO-discoverability (FIX 4 v14):
+      (1) Chi è: brand + anno fondazione se disponibile
+      (2) Cosa fa: servizio principale + almeno un dato numerico o certificazione reale
+      (3) Dove opera: riferimento geografico preciso
+      (4) Perché è diversa: un elemento verificabile dalle fonti
+
+    ai_summary: "Blocco testo di 120-150 parole, strutturato per essere
+    citato da AI come ChatGPT, Perplexity e Google SGE. Deve contenere:
+    (1) chi è l'azienda in una frase con anno fondazione se disponibile,
+    (2) cosa fa esattamente con almeno un dato numerico o certificazione reale,
+    (3) dove opera con riferimento geografico preciso,
+    (4) perché è diversa in UNA frase con elemento verificabile dalle fonti RAG o dal debrief.
+    NO cliché, NO aggettivi generici. Ogni claim deve essere verificabile
+    dalle fonti RAG o dal debrief."
+    """
     addr = parse_address(local_seo.get("indirizzo", ""))
     city = addr.get("addressLocality", "")
     province = addr.get("addressRegion", "")
     location_str = f"{city} ({province})" if city and province else city
+
+    anno = local_seo.get("anno_fondazione", "").strip()
     primo_servizio = servizi.split(",")[0].strip() if servizi else ""
+
     fatto_lines = [l.strip().strip("·•-\"'") for l in fatti.split("\n") if l.strip()]
-    primo_fatto = fatto_lines[0] if fatto_lines else ""
-    parti = []
-    if azienda:
-        parti.append(azienda)
-    if primo_servizio:
-        parti.append(f"specializzata in {primo_servizio}")
-    if location_str:
-        parti.append(f"con sede a {location_str}")
-    if primo_fatto:
-        parti.append(primo_fatto)
+
+    # (1) Chi è — con anno se disponibile
+    if anno:
+        chi_e = f"Dal {anno}, {azienda}"
+    else:
+        chi_e = azienda
+
+    # (2) Cosa fa — primo servizio
+    cosa_fa = f"specializzata in {primo_servizio}" if primo_servizio else ""
+
+    # (3) Dove opera — indirizzo geografico preciso
+    dove = f"con sede a {location_str}" if location_str else ""
+
+    # (4) Perché è diversa — primo fatto citabile (dato numerico o certificazione)
+    perche = fatto_lines[0] if fatto_lines else ""
+
+    parti = [p for p in [chi_e, cosa_fa, dove, perche] if p]
     summary = ", ".join(parti)
     if summary and not summary.endswith("."):
         summary += "."
-    if len(summary) > 200:
-        summary = summary[:197].rsplit(" ", 1)[0].rstrip(",") + "..."
+    if len(summary) > 300:
+        summary = summary[:297].rsplit(" ", 1)[0].rstrip(",") + "."
     return summary
 
 
@@ -2418,7 +2479,13 @@ def prompt_home(ctx: str, lingua: str = "italiano") -> str:
     lang_block = _lang_lock_block(lingua)
     return f"""{ctx}
 
-{lang_block}Genera SOLO il blocco "home". Ogni campo di prosa (intro, body) deve essere
+{lang_block}SEGNALI E-E-A-T OBBLIGATORI NEL TESTO (FIX 5 v14):
+- Se disponibile, cita l'anno di fondazione nel primo paragrafo (es. "Dal 2008, [Azienda]...")
+- Se disponibili certificazioni/premi dalle fonti RAG, citali per esteso almeno una volta (es. "certificata DOP Umbria dal 2015")
+- Evita pronomi generici: usa sempre il nome del brand o "il team di [Brand]"
+- Ogni claim numerico deve avere contesto: non "oltre 500 clienti" ma "oltre 500 clienti serviti in Umbria e Toscana dal 2010"
+
+Genera SOLO il blocco "home". Ogni campo di prosa (intro, body) deve essere
 UN TESTO NARRATIVO CONTINUATIVO, non un elenco di frasi nominali.
 
 ESEMPIO DEL FORMATO ATTESO PER IL CAMPO "intro" (replica lo stile):
@@ -2452,7 +2519,13 @@ def prompt_servizio(ctx: str, lingua: str = "italiano") -> str:
     lang_block = _lang_lock_block(lingua)
     return f"""{ctx}
 
-{lang_block}Genera SOLO il blocco "pagina_servizio". L'intro deve essere prosa fluida;
+{lang_block}SEGNALI E-E-A-T OBBLIGATORI NEL TESTO (FIX 5 v14):
+- Se disponibile, cita l'anno di fondazione nel primo paragrafo (es. "Dal 2008, [Azienda]...")
+- Se disponibili certificazioni/premi dalle fonti RAG, citali per esteso almeno una volta (es. "certificata DOP Umbria dal 2015")
+- Evita pronomi generici: usa sempre il nome del brand o "il team di [Brand]"
+- Ogni claim numerico deve avere contesto: non "oltre 500 clienti" ma "oltre 500 clienti serviti in Umbria e Toscana dal 2010"
+
+Genera SOLO il blocco "pagina_servizio". L'intro deve essere prosa fluida;
 SOLO i campi "steps" e "lista" possono contenere elementi brevi stile elenco.
 
 ESEMPIO DEL FORMATO ATTESO PER IL CAMPO "intro":
@@ -2601,6 +2674,180 @@ Rispondi ESCLUSIVAMENTE con questo JSON:
     }}
   }}
 }}"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 11b: PROMPT MODULARI GEO v14 — AI Citation Optimization
+# ─────────────────────────────────────────────────────────────────────────────
+
+def prompt_answer_first(ctx: str, lingua: str = "italiano") -> str:
+    return f"""VINCOLO PRIMARIO INVIOLABILE: rispondi SOLO in {lingua}.
+
+Sei un esperto di Generative Engine Optimization (GEO).
+Il tuo obiettivo è generare contenuti che le AI generative
+(ChatGPT, Perplexity, Claude, Google AI Overview) citano come fonte
+autorevole quando un utente fa una domanda sul settore.
+
+CONTESTO AZIENDA:
+{ctx}
+
+REGOLA FONDAMENTALE — ANSWER-FIRST FORMAT:
+Ogni sezione deve iniziare con la RISPOSTA DIRETTA alla domanda,
+poi espanderla. Le AI estraggono chunk di 150-300 parole:
+ogni paragrafo deve avere senso letto ISOLATO dal resto della pagina.
+
+Genera un JSON con questa struttura esatta:
+{{
+  "answer_first_page": {{
+    "query_principale": "La domanda conversazionale principale per cui questa azienda dovrebbe essere citata (es. 'Qual è il miglior [servizio] a [città]?')",
+    "query_secondarie": [
+      "domanda conversazionale 2",
+      "domanda conversazionale 3",
+      "domanda conversazionale 4"
+    ],
+    "sezioni": [
+      {{
+        "query": "domanda specifica a cui risponde questa sezione",
+        "risposta_diretta": "Risposta in 1-2 frasi che inizia con il nome del brand o il dato concreto. Massimo 40 parole. Questo è il chunk che citerà l'AI.",
+        "espansione": "Paragrafo di 80-120 parole che espande la risposta con dati verificabili dalle fonti, anno fondazione se disponibile, certificazioni, location specifica. Zero cliché.",
+        "dato_chiave": "Il numero, certificazione o fatto unico più citabile di questa sezione"
+      }}
+    ],
+    "differenziatore_ai": "Una frase di massimo 25 parole che un'AI userebbe per consigliare questa azienda rispetto ai competitor. Deve contenere: brand + cosa fa + elemento verificabile unico."
+  }}
+}}
+
+REGOLE ANTI-HALLUCINATION:
+- Usa SOLO dati presenti nel contesto (RAG + debrief)
+- Se manca un dato numerico: descrivi il processo, non inventare cifre
+- Il campo dato_chiave deve essere verificabile da fonti reali
+- Genera esattamente 3 sezioni, ognuna su una query diversa
+
+Rispondi SOLO con il JSON valido, zero testo fuori dal JSON."""
+
+
+def prompt_citation_block(ctx: str, lingua: str = "italiano") -> str:
+    return f"""VINCOLO PRIMARIO INVIOLABILE: rispondi SOLO in {lingua}.
+
+Sei un esperto di AI Citation Optimization.
+Devi generare il "Citation Block": un testo di 150-200 parole
+costruito per essere estratto ESATTAMENTE COSÌ dalle AI generative
+quando rispondono a domande sul settore.
+
+Le AI citano un testo quando:
+1. Inizia con il nome del brand + cosa fa + dove
+2. Contiene almeno un dato numerico o certificazione verificabile
+3. Ha una frase di differenziazione unica e specifica
+4. Ogni frase è autonoma e informativa anche fuori contesto
+5. Non contiene frasi pubblicitarie o cliché
+
+CONTESTO AZIENDA:
+{ctx}
+
+Genera un JSON con questa struttura:
+{{
+  "citation_block": {{
+    "testo_principale": "Il testo di 150-200 parole ottimizzato per AI citation. Struttura obbligatoria: FRASE 1: [Brand] è [cosa fa] con sede a [location specifica], [anno fondazione se disponibile]. FRASE 2-3: [Dato concreto o certificazione reale dalle fonti]. FRASE 4-5: [Cosa offre di specifico, con dettaglio tecnico o metodologia]. FRASE 6-7: [Elemento unico verificabile che nessun competitor ha]. FRASE 8: [Dato di contatto o call-to-action informativo, non pubblicitario].",
+    "versione_breve": "Versione da 50-60 parole dello stesso testo, per snippet AI ancora più diretti.",
+    "keyword_semantiche": [
+      "lista di 8-10 termini che le AI associano a questo brand dopo aver letto il citation block — non keyword SEO generiche, ma concetti specifici del settore e della location"
+    ],
+    "where_to_place": [
+      "Homepage — sezione About, dopo il primo paragrafo",
+      "Pagina Chi Siamo — primo blocco testo",
+      "Footer — colonna descrizione azienda",
+      "Google Business Profile — descrizione attività",
+      "Ogni profilo directory di settore"
+    ]
+  }}
+}}
+
+REGOLE ANTI-HALLUCINATION:
+- Ogni claim deve provenire da RAG o debrief — zero invenzioni
+- Se manca l'anno: ometti, non inventare
+- Se mancano dati numerici: usa fatti qualitativi specifici e verificabili
+- Il testo deve sembrare scritto da un giornalista, non da un marketer
+
+Rispondi SOLO con JSON valido."""
+
+
+def prompt_offsite_geo(ctx: str, lingua: str = "italiano") -> str:
+    return f"""VINCOLO PRIMARIO INVIOLABILE: rispondi SOLO in {lingua}.
+
+Sei un esperto di Generative Engine Optimization off-site.
+Le AI generative citano brand che compaiono in MOLTE fonti terze
+autorevoli — non solo sul proprio sito. Il tuo compito è generare
+un piano operativo CONCRETO e SPECIFICO per questo brand.
+
+CONTESTO AZIENDA:
+{ctx}
+
+Per ogni azione, devi essere SPECIFICO: non "registrati su directory"
+ma "registrati su Infobel.it — compila questi campi: nome, P.IVA,
+categoria '[categoria specifica del settore]', descrizione con
+citation block".
+
+Genera un JSON con questa struttura:
+{{
+  "offsite_geo_plan": {{
+    "priorita_alta": [
+      {{
+        "azione": "Nome dell'azione specifica",
+        "piattaforma": "Nome esatto della piattaforma/sito",
+        "url": "URL diretto dove registrarsi o agire",
+        "istruzioni": "Istruzioni operative in 2-3 frasi: cosa fare esattamente, quali campi compilare, quale testo usare (il citation block o la versione breve)",
+        "impatto_geo": "Perché questa azione aumenta le citazioni AI: spiegazione in 1 frase",
+        "tempo_stimato": "es. 20 minuti"
+      }}
+    ],
+    "priorita_media": [
+      {{
+        "azione": "Nome azione",
+        "piattaforma": "Piattaforma",
+        "url": "URL",
+        "istruzioni": "Istruzioni operative",
+        "impatto_geo": "Impatto sulle citazioni AI",
+        "tempo_stimato": "Tempo"
+      }}
+    ],
+    "priorita_bassa": [
+      {{
+        "azione": "Nome azione",
+        "piattaforma": "Piattaforma",
+        "url": "URL",
+        "istruzioni": "Istruzioni operative",
+        "impatto_geo": "Impatto sulle citazioni AI",
+        "tempo_stimato": "Tempo"
+      }}
+    ],
+    "digital_pr": {{
+      "angoli_notiziabili": [
+        "Lista di 3-4 angoli giornalistici reali su cui questo brand potrebbe ottenere copertura stampa. Devono essere specifici e basati sui fatti del debrief."
+      ],
+      "testate_target": [
+        "Lista di 5-7 testate online o blog di settore italiani dove proporre un articolo o una menzione. Sii specifico sul settore e sulla regione."
+      ],
+      "template_outreach": "Template email di 80 parole per contattare una testata e proporre un articolo o una menzione. Personalizzato sul brand."
+    }},
+    "review_strategy": {{
+      "piattaforme": ["Google Business", "Trustpilot", "altre piattaforme rilevanti per il settore"],
+      "testo_richiesta_recensione": "SMS/WhatsApp di 50 parole da inviare ai clienti per chiedere una recensione. Include le keyword semantiche che vuoi associare al brand.",
+      "keyword_da_stimolare": [
+        "3-4 keyword che vuoi che i clienti usino nelle recensioni per rafforzare l'associazione topic-brand nelle AI"
+      ]
+    }}
+  }}
+}}
+
+REGOLE:
+- Le azioni priorita_alta devono essere eseguibili entro 1 settimana
+- Ogni URL deve essere reale e verificabile
+- Le testate target devono essere reali e attive nel 2024-2025
+- Il template outreach non deve sembrare spam
+- Adatta tutto al settore specifico del brand (non consigli generici)
+
+Genera 5-6 azioni priorita_alta, 4-5 priorita_media, 3-4 priorita_bassa.
+Rispondi SOLO con JSON valido."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2897,7 +3144,7 @@ def faq_to_md(faqs):
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
-        page_title="GEO Score™ v12 — The Authority Orchestrator",
+        page_title="GEO Score™ v14 — The Authority Orchestrator",
         page_icon="🐊",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -2934,10 +3181,14 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
+    # Carica history da disco al primo avvio della sessione
+    if "client_history" not in st.session_state:
+        st.session_state["client_history"] = load_history()
+
     st.markdown("""
     <div class="geo-header">
-        <h1>🐊 GEO Score™ Content Generator v12 — The Authority Orchestrator</h1>
-        <p>v12: Edit Inline · History · Tone of Voice · Rich Result · Fix Products/Sentiment/Meta · Schema Store · Framework GEO Score™ by Nico Fioretti</p>
+        <h1>🐊 GEO Score™ Content Generator v14 — The Authority Orchestrator</h1>
+        <p>v14: Modelli Anthropic 4.6 · History Persistente · Export per Sezione · AI Summary GEO · E-E-A-T Signals · Edit Inline · Tone of Voice · Schema Store · Framework GEO Score™ by Nico Fioretti</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -2951,7 +3202,7 @@ def main():
         if provider == "openai":
             opts, dflt = list(PRICING["openai"].keys()), "gpt-4o-mini"
         else:
-            opts, dflt = list(PRICING["anthropic"].keys()), "claude-sonnet-4-5"
+            opts, dflt = list(PRICING["anthropic"].keys()), "claude-sonnet-4-6"
 
         model = st.selectbox("Modello", opts,
                              index=opts.index(dflt) if dflt in opts else 0,
@@ -2982,9 +3233,9 @@ def main():
         # ── FUNZIONALITÀ B: History Sidebar ──────────────────────────────────
         history = st.session_state.get("client_history", [])
         if history:
-            st.subheader("🕐 Clienti Recenti")
-            st.caption("Clicca per ripristinare un debrief")
-            for i, entry in enumerate(reversed(history[-10:])):
+            st.subheader("🕐 Clienti Salvati")
+            st.caption(f"{len(history)} clienti in archivio · Clicca per ripristinare")
+            for i, entry in enumerate(reversed(history[-50:])):
                 if st.button(
                     f"🐊 {entry['azienda']}",
                     key=f"hist_{i}",
@@ -3005,6 +3256,10 @@ def main():
                             st.session_state[key_orario] = entry[key_orario]
                     st.success(f"✅ Debrief '{entry['azienda']}' ripristinato!")
                     st.rerun()
+            if st.button("🗑️ Svuota archivio", key="clear_history"):
+                st.session_state["client_history"] = []
+                save_history([])
+                st.rerun()
             st.divider()
 
         st.markdown("""
@@ -3039,19 +3294,29 @@ def main():
             for t in CLICHE_BLACKLIST:
                 st.markdown(f"✗ _{t}_")
 
-        with st.expander("✅ Fix v12 attivi"):
+        with st.expander("✅ Fix v14 attivi"):
             st.markdown("""
-            **FIX 7**  — Products vs Awards separati (nomi puliti)  
-            **FIX 8**  — Sentiment fallback da fatti/geo_entities  
-            **FIX 9**  — FAQ key format unificato + nota JSON  
-            **FIX 10** — entities.products popolato  
-            **FIX 11** — Schema @type: Store per frantoio/olio (no FoodEstablishment)  
-            **FIX 12** — meta_description: frase completa, no troncamento  
-            **FIX 13** — Rich Result: review + aggregateRating + offers.price  
-            **A** — Edit inline sezioni risultati  
-            **B** — History ultimi 10 clienti nella sidebar  
-            **C** — Tone of Voice: Product / Storytelling / Bilanciato  
-            **D** — Rich Snippet Google completato  
+            **FIX 7**  — Products vs Awards separati (nomi puliti)
+            **FIX 8**  — Sentiment fallback da fatti/geo_entities
+            **FIX 9**  — FAQ key format unificato + nota JSON
+            **FIX 10** — entities.products popolato
+            **FIX 11** — Schema @type: Store per frantoio/olio (no FoodEstablishment)
+            **FIX 12** — meta_description: frase completa, no troncamento
+            **FIX 13** — Rich Result: review + aggregateRating + offers.price
+            **FIX 14** — Product.offers.price sempre presente
+            **FIX 15** — Product.image con fallback URL azienda
+            **FIX 16** — LocalBusiness.image da logo_url
+            **FIX 17** — LocalBusiness.priceRange da local_seo
+            **FIX 18** — servesCuisine type-gated
+            **FIX 19** — priceRange type-gated
+            **A** — Edit inline sezioni risultati
+            **B** — History persistente su disco (max 50)
+            **C** — Tone of Voice: Product / Storytelling / Bilanciato
+            **D** — Rich Snippet Google completato
+            **E** — Modelli Anthropic 4.6 (Sonnet/Opus/Haiku)
+            **F** — Export per sezione (JSON + Schema.org)
+            **G** — AI Summary 4-point GEO-discoverability
+            **H** — Segnali E-E-A-T obbligatori nei prompt
             """)
 
 
@@ -3197,7 +3462,7 @@ def main():
     # TAB 2: GENERATORE MODULARE
     # ═══════════════════════════════════════════════════════════════════════
     with tab2:
-        st.subheader("🛠️ Generatore Modulare — Anti-Hallucination v4 · Fix v12")
+        st.subheader("🛠️ Generatore Modulare — Anti-Hallucination v4 · Fix v14")
 
         _az  = st.session_state.get("azienda","")
         _sv  = st.session_state.get("servizi","")
@@ -3267,7 +3532,32 @@ def main():
             gen_schema  = st.checkbox("🔗 Schema Markup",   value=True, key="gen_schema")
             st.caption("JSON-LD LocalBusiness/Org + FAQ")
 
-        n_sel = sum([gen_home, gen_service, gen_faq, gen_schema])
+        st.caption("🤖 **Moduli GEO Avanzati** — ottimizzazione per citazioni AI generative")
+        mc5, mc6, mc7 = st.columns(3)
+        with mc5:
+            gen_answer_first = st.checkbox(
+                "🤖 Answer-First Page",
+                value=False,
+                key="gen_answer_first"
+            )
+            st.caption("Query conversazionali per AI citation")
+        with mc6:
+            gen_citation = st.checkbox(
+                "📌 Citation Block",
+                value=False,
+                key="gen_citation"
+            )
+            st.caption("Chunk ottimizzato per essere citato dalle AI")
+        with mc7:
+            gen_offsite = st.checkbox(
+                "🌐 Off-site GEO Plan",
+                value=False,
+                key="gen_offsite"
+            )
+            st.caption("Piano azioni esterne per aumentare citazioni AI")
+
+        n_sel = sum([gen_home, gen_service, gen_faq, gen_schema,
+                     gen_answer_first, gen_citation, gen_offsite])
         if n_sel == 0:
             st.warning("Seleziona almeno una sezione.")
 
@@ -3372,10 +3662,13 @@ def main():
             )
 
             sections = []
-            if gen_home:    sections.append("home")
-            if gen_service: sections.append("servizio")
-            if gen_faq:     sections.append("faq")
-            if gen_schema:  sections.append("schema")
+            if gen_home:         sections.append("home")
+            if gen_service:      sections.append("servizio")
+            if gen_faq:          sections.append("faq")
+            if gen_schema:       sections.append("schema")
+            if gen_answer_first: sections.append("answer_first")
+            if gen_citation:     sections.append("citation")
+            if gen_offsite:      sections.append("offsite")
 
             progress = st.progress(0, text="Avvio generazione modulare...")
 
@@ -3389,9 +3682,17 @@ def main():
                         user_p = prompt_servizio(ctx, lingua=_ln)
                     elif section == "faq":
                         user_p = prompt_faq_hybrid(ctx, lingua=_ln)
-                    else:
+                    elif section == "schema":
                         faq_data = generated.get("faq", [])
                         user_p   = prompt_schema(ctx, _az, _loc_enriched, faq_data, lingua=_ln)
+                    elif section == "answer_first":
+                        user_p = prompt_answer_first(ctx, lingua=_ln)
+                    elif section == "citation":
+                        user_p = prompt_citation_block(ctx, lingua=_ln)
+                    elif section == "offsite":
+                        user_p = prompt_offsite_geo(ctx, lingua=_ln)
+                    else:
+                        continue
 
                     raw, in_t, out_t = call_api(provider, api_key, model, sys_p, user_p)
 
@@ -3513,7 +3814,8 @@ def main():
                 # Rimuovi duplicato per stesso nome azienda se già presente
                 history = [h for h in history if h.get("azienda") != _az]
                 history.append(snapshot)
-                st.session_state["client_history"] = history[-10:]  # max 10
+                st.session_state["client_history"] = history[-50:]  # max 50
+                save_history(st.session_state["client_history"])
 
             st.markdown("#### 📊 Report per Sezione")
             for sec, ok, info in call_log:
@@ -3528,7 +3830,7 @@ def main():
     # TAB 3: RISULTATI
     # ═══════════════════════════════════════════════════════════════════════
     with tab3:
-        st.subheader("📄 Risultati — v12 · Edit Inline · Rich Result · Schema Store · Sentiment Fallback")
+        st.subheader("📄 Risultati — v14 · Edit Inline · Rich Result · Schema Store · Sentiment Fallback")
 
         if not st.session_state.get("generated"):
             st.info("🔄 Vai al tab **🛠️ Generatore** per creare i contenuti.")
@@ -3549,14 +3851,15 @@ def main():
 
         qs = data.get("quality_score", {})
         if qs:
-            st.markdown("#### 📊 Quality Score v5")
-            q1, q2, q3, q4 = st.columns(4)
+            st.markdown("#### 📊 Quality Score v14")
+            q1, q2, q3, q4, q5 = st.columns(5)
             q1.metric("E-E-A-T", f"{qs.get('eeat',0)}/10")
             q2.metric("SEO",     f"{qs.get('seo', 0)}/10")
             q3.metric("GEO",     f"{qs.get('geo', 0)}/10")
+            q4.metric("AI-Ready", f"{qs.get('ai_ready',0)}/10")
             risk = qs.get("risk_level", "low")
             risk_icon = "🟢" if risk == "low" else "🟡" if risk == "medium" else "🔴"
-            q4.metric("Risk Level", f"{risk_icon} {risk}")
+            q5.metric("Risk Level", f"{risk_icon} {risk}")
 
         ai_sum = data.get("ai_summary", "")
         if ai_sum:
@@ -3616,6 +3919,9 @@ def main():
         if data.get("faq"):             avail.append(("❓ FAQ","faq"))
         if data.get("products"):        avail.append(("🛒 Prodotti","prodotti"))
         if data.get("schema_markup") or data.get("faq"): avail.append(("🔗 Schema","schema"))
+        if data.get("answer_first_page"): avail.append(("🤖 Answer-First","answer_first"))
+        if data.get("citation_block"):    avail.append(("📌 Citation Block","citation"))
+        if data.get("offsite_geo_plan"):  avail.append(("🌐 Off-site GEO","offsite"))
 
         if not avail:
             st.warning("Nessuna sezione trovata. Ritorna al Generatore.")
@@ -3760,6 +4066,143 @@ def main():
                     st.code(script_block, language="html")
                     copy_box("📋 Copia Schema JSON-LD", script_block, "cp_schema")
 
+                elif key == "answer_first":
+                    afp = data["answer_first_page"]
+                    st.markdown("### Query principale")
+                    st.info(f"❓ **{afp.get('query_principale','')}**")
+
+                    qs_af = afp.get("query_secondarie", [])
+                    if qs_af:
+                        st.markdown("**Query secondarie target:**")
+                        for q in qs_af:
+                            st.markdown(f"- _{q}_")
+
+                    st.divider()
+                    st.markdown("### Sezioni Answer-First")
+                    st.caption("Ogni sezione è un chunk autonomo ottimizzato per essere citato dalle AI")
+
+                    for sez in afp.get("sezioni", []):
+                        with st.expander(f"❓ {sez.get('query','')}"):
+                            st.markdown("**🎯 Risposta diretta (chunk AI):**")
+                            st.success(sez.get("risposta_diretta",""))
+                            st.markdown("**📝 Espansione:**")
+                            st.markdown(sez.get("espansione",""))
+                            if sez.get("dato_chiave"):
+                                st.markdown(f"**📊 Dato chiave citabile:** `{sez['dato_chiave']}`")
+
+                    st.divider()
+                    diff = afp.get("differenziatore_ai","")
+                    if diff:
+                        st.markdown("### 💡 Differenziatore AI")
+                        st.warning(f"**Frase da usare ovunque:** {diff}")
+                        copy_box("📋 Copia differenziatore", diff, "cp_diff_ai")
+
+                    copy_box(
+                        "📋 Copia Answer-First Page (JSON)",
+                        json.dumps(afp, ensure_ascii=False, indent=2),
+                        "cp_answer_first"
+                    )
+
+                elif key == "citation":
+                    cb = data["citation_block"]
+
+                    st.markdown("### 📌 Citation Block — Chunk AI-Ready")
+                    st.caption("Questo testo è costruito per essere estratto e citato da ChatGPT, Perplexity, Claude e Google AI Overview")
+
+                    testo = cb.get("testo_principale","")
+                    st.markdown("**Versione completa (150-200 parole):**")
+                    st.info(testo)
+                    copy_box("📋 Copia Citation Block completo", testo, "cp_citation_full")
+
+                    breve = cb.get("versione_breve","")
+                    if breve:
+                        st.markdown("**Versione breve (50-60 parole) — per snippet:**")
+                        st.success(breve)
+                        copy_box("📋 Copia versione breve", breve, "cp_citation_short")
+
+                    kw = cb.get("keyword_semantiche",[])
+                    if kw:
+                        st.markdown("**🧠 Keyword semantiche associate dalle AI:**")
+                        st.markdown(" · ".join(f"`{k}`" for k in kw))
+
+                    places = cb.get("where_to_place",[])
+                    if places:
+                        st.markdown("**📍 Dove inserire questo testo:**")
+                        for p in places:
+                            st.markdown(f"✅ {p}")
+
+                    copy_box(
+                        "📋 Copia Citation Block (JSON)",
+                        json.dumps(cb, ensure_ascii=False, indent=2),
+                        "cp_citation_json"
+                    )
+
+                elif key == "offsite":
+                    plan = data["offsite_geo_plan"]
+
+                    st.markdown("### 🌐 Off-site GEO Plan — Azioni per essere citati dalle AI")
+                    st.caption("Le AI citano brand che compaiono in molte fonti terze autorevoli. Questo piano ti dice esattamente dove e come.")
+
+                    for livello, label_lv, color in [
+                        ("priorita_alta",  "🔴 Priorità Alta — Esegui entro 1 settimana", "🔴"),
+                        ("priorita_media", "🟡 Priorità Media — Entro 1 mese",           "🟡"),
+                        ("priorita_bassa", "🟢 Priorità Bassa — Entro 3 mesi",           "🟢"),
+                    ]:
+                        azioni = plan.get(livello, [])
+                        if azioni:
+                            st.markdown(f"#### {label_lv}")
+                            for az_item in azioni:
+                                with st.expander(f"{color} {az_item.get('azione','')} — {az_item.get('piattaforma','')} · ⏱️ {az_item.get('tempo_stimato','')}"):
+                                    if az_item.get("url"):
+                                        st.markdown(f"🔗 **URL:** [{az_item['url']}]({az_item['url']})")
+                                    st.markdown(f"**Come farlo:** {az_item.get('istruzioni','')}")
+                                    st.markdown(f"**Perché aumenta le citazioni AI:** _{az_item.get('impatto_geo','')}_")
+
+                    st.divider()
+                    dpr = plan.get("digital_pr", {})
+                    if dpr:
+                        st.markdown("#### 📰 Digital PR — Strategia per copertura stampa")
+
+                        angoli = dpr.get("angoli_notiziabili", [])
+                        if angoli:
+                            st.markdown("**Angoli giornalistici notiziabili:**")
+                            for a in angoli:
+                                st.markdown(f"- {a}")
+
+                        testate = dpr.get("testate_target", [])
+                        if testate:
+                            st.markdown("**Testate target:**")
+                            st.markdown(" · ".join(f"`{t}`" for t in testate))
+
+                        template = dpr.get("template_outreach","")
+                        if template:
+                            st.markdown("**Template outreach:**")
+                            st.text_area("Email da personalizzare", value=template,
+                                         height=120, key="template_outreach_display")
+                            copy_box("📋 Copia template outreach", template, "cp_outreach")
+
+                    st.divider()
+                    rev = plan.get("review_strategy", {})
+                    if rev:
+                        st.markdown("#### ⭐ Review Strategy — Stimola le recensioni giuste")
+
+                        testo_rev = rev.get("testo_richiesta_recensione","")
+                        if testo_rev:
+                            st.markdown("**Messaggio da inviare ai clienti:**")
+                            st.success(testo_rev)
+                            copy_box("📋 Copia messaggio recensione", testo_rev, "cp_review_msg")
+
+                        kw_rev = rev.get("keyword_da_stimolare",[])
+                        if kw_rev:
+                            st.markdown("**Keyword da stimolare nelle recensioni:**")
+                            st.markdown(" · ".join(f"`{k}`" for k in kw_rev))
+
+                    copy_box(
+                        "📋 Copia Piano Off-site (JSON)",
+                        json.dumps(plan, ensure_ascii=False, indent=2),
+                        "cp_offsite_json"
+                    )
+
         st.divider()
 
         with st.expander("🔧 JSON Raw completo (debug / sviluppatori)"):
@@ -3770,7 +4213,7 @@ def main():
                 "azienda":   _az,
                 "provider":  provider,
                 "model":     model,
-                "version":   "v13",
+                "version":   "v14",
                 "tone":      st.session_state.get("tone","bilanciato"),
                 "in_tokens": in_t,
                 "out_tokens":out_t,
@@ -3780,6 +4223,13 @@ def main():
                 "geo_entities":  meta.get("geo_entities", []),
                 "rag_attivo":    meta.get("rag_attivo", False),
                 "scraping_attivo": meta.get("scraping_attivo", False),
+                "fixes_v14": [
+                    "anthropic_models_updated_sonnet46_opus46_haiku45",
+                    "history_persistent_json_disk_max50",
+                    "export_per_section_json_schema",
+                    "ai_summary_4point_geo_discoverability",
+                    "eeat_signals_mandatory_in_prompts",
+                ],
                 "fixes_v13": [
                     "product_offers_price_always_present",
                     "product_image_added_with_fallback",
@@ -3810,9 +4260,89 @@ def main():
         st.download_button(
             "⬇️ Scarica pacchetto completo (JSON con fonti)",
             data=json.dumps(export, ensure_ascii=False, indent=2),
-            file_name=f"geo_alligator_v12_{_az.replace(' ','_').lower()}.json",
+            file_name=f"geo_alligator_v14_{_az.replace(' ','_').lower()}.json",
             mime="application/json"
         )
+
+        st.markdown("#### 📦 Download per Sezione")
+        st.caption("Scarica ogni blocco separatamente per incollarlo su WordPress")
+
+        col_d1, col_d2, col_d3 = st.columns(3)
+
+        with col_d1:
+            if data.get("home"):
+                home_export = json.dumps(data["home"], ensure_ascii=False, indent=2)
+                st.download_button(
+                    "⬇️ Homepage (JSON)",
+                    data=home_export,
+                    file_name=f"home_{_az.replace(' ','_').lower()}.json",
+                    mime="application/json",
+                    key="dl_home"
+                )
+
+        with col_d2:
+            if data.get("pagina_servizio"):
+                serv_export = json.dumps(data["pagina_servizio"], ensure_ascii=False, indent=2)
+                st.download_button(
+                    "⬇️ Pagina Servizio (JSON)",
+                    data=serv_export,
+                    file_name=f"servizio_{_az.replace(' ','_').lower()}.json",
+                    mime="application/json",
+                    key="dl_servizio"
+                )
+
+        with col_d3:
+            if data.get("faq"):
+                faq_export = json.dumps(data["faq"], ensure_ascii=False, indent=2)
+                st.download_button(
+                    "⬇️ FAQ (JSON)",
+                    data=faq_export,
+                    file_name=f"faq_{_az.replace(' ','_').lower()}.json",
+                    mime="application/json",
+                    key="dl_faq"
+                )
+
+        st.markdown("#### 🔗 Download Schema.org Separati")
+        col_s1, col_s2, col_s3 = st.columns(3)
+
+        schema_data = data.get("schema_markup", {})
+        graph = schema_data.get("@graph", [])
+
+        with col_s1:
+            lb_node = next((n for n in graph if n.get("@type") not in ("FAQPage", "Product")), None)
+            if lb_node:
+                lb_script = f'<script type="application/ld+json">\n{json.dumps({"@context":"https://schema.org","@graph":[lb_node]}, ensure_ascii=False, indent=2)}\n</script>'
+                st.download_button(
+                    "⬇️ Schema LocalBusiness",
+                    data=lb_script,
+                    file_name=f"schema_localbusiness_{_az.replace(' ','_').lower()}.html",
+                    mime="text/html",
+                    key="dl_schema_lb"
+                )
+
+        with col_s2:
+            faq_node = next((n for n in graph if n.get("@type") == "FAQPage"), None)
+            if faq_node:
+                faq_script = f'<script type="application/ld+json">\n{json.dumps({"@context":"https://schema.org","@graph":[faq_node]}, ensure_ascii=False, indent=2)}\n</script>'
+                st.download_button(
+                    "⬇️ Schema FAQPage",
+                    data=faq_script,
+                    file_name=f"schema_faq_{_az.replace(' ','_').lower()}.html",
+                    mime="text/html",
+                    key="dl_schema_faq"
+                )
+
+        with col_s3:
+            prod_nodes = [n for n in graph if n.get("@type") == "Product"]
+            if prod_nodes:
+                prod_script = f'<script type="application/ld+json">\n{json.dumps({"@context":"https://schema.org","@graph":prod_nodes}, ensure_ascii=False, indent=2)}\n</script>'
+                st.download_button(
+                    "⬇️ Schema Products",
+                    data=prod_script,
+                    file_name=f"schema_products_{_az.replace(' ','_').lower()}.html",
+                    mime="text/html",
+                    key="dl_schema_products"
+                )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
