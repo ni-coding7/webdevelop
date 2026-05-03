@@ -439,9 +439,9 @@ def build_entity_block(azienda: str, servizi: str, local_seo: dict, schema_type:
                        products_list: list = None) -> dict:
     indirizzo = local_seo.get("indirizzo", "")
     addr = parse_address(indirizzo)
-    # FIX 10 v12: servizi split pulito — split su separatori standard, rimuove frammenti < 4 char
-    servizi_raw = [s.strip() for s in re.split(r"[,;\n·•]+", servizi) if s.strip()]
-    servizi_list = [s for s in servizi_raw if len(s) > 3][:8]
+    # FIX 10 v12: servizi split — solo separatori semantici, NON virgole (evita frammentazione)
+    servizi_raw = [s.strip() for s in re.split(r"[;\n·•]+", servizi) if s.strip()]
+    servizi_list = [s for s in servizi_raw if len(s) > 8][:8]
     # FIX 10 v12: entities.products popolato con nomi commerciali puliti (non [])
     entity_products = []
     if products_list:
@@ -866,59 +866,47 @@ def build_schema_markup(
     opening_hours_spec = build_opening_hours_spec(orari) if orari else []
     same_as_list = same_as or []
 
-    # Nodo LocalBusiness
-    local_business = {
+    # Nodo principale unificato — merge LocalBusiness + Organization in un'unica entità
+    # Elimina il nodo duplicato che confonde Google e i motori AI
+    business_entity = {
         "@type": schema_type,
-        "@id": f"{base_id}#business",
+        "@id": f"{base_id}#organization",
         "name": azienda,
         "url": url_raw,
         "telephone": local_seo.get("telefono", ""),
         "email": local_seo.get("email", ""),
         "address": address,
     }
-    local_business = {k: v for k, v in local_business.items() if v}
+    business_entity = {k: v for k, v in business_entity.items() if v}
     if geo:
-        local_business["geo"] = geo
+        business_entity["geo"] = geo
     if opening_hours_spec:
-        local_business["openingHoursSpecification"] = opening_hours_spec
+        business_entity["openingHoursSpecification"] = opening_hours_spec
     if same_as_list:
-        local_business["sameAs"] = same_as_list
-    # FIX v13: image (facoltativo ma raccomandato da Google per rich result)
+        business_entity["sameAs"] = same_as_list
     logo_url = local_seo.get("logo_url", "").strip()
     if logo_url:
-        local_business["image"] = logo_url
-    # FIX v13: priceRange — solo per tipi che lo supportano semanticamente
+        business_entity["image"] = logo_url
     PRICE_RANGE_TYPES = {"Restaurant", "BarOrPub", "Bakery", "IceCreamShop", "Store",
                          "ClothingStore", "JewelryStore", "BookStore", "Hotel",
                          "BedAndBreakfast", "LodgingBusiness", "DaySpa", "Winery"}
     price_range_biz = local_seo.get("price_range", "").strip()
     if price_range_biz and schema_type in PRICE_RANGE_TYPES:
-        local_business["priceRange"] = price_range_biz
-    # servesCuisine — solo per tipi ristorativi (Restaurant, BarOrPub, ecc.)
+        business_entity["priceRange"] = price_range_biz
     SERVES_CUISINE_TYPES = {"Restaurant", "BarOrPub", "Bakery", "IceCreamShop"}
     serves_cuisine = local_seo.get("serves_cuisine", "").strip()
     if serves_cuisine and schema_type in SERVES_CUISINE_TYPES:
-        local_business["servesCuisine"] = serves_cuisine
-
-    # Nodo Organization
-    organization = {
-        "@type": "Organization",
-        "@id": f"{base_id}#organization",
-        "name": azienda,
-        "url": url_raw,
-    }
-    if same_as_list:
-        organization["sameAs"] = same_as_list
+        business_entity["servesCuisine"] = serves_cuisine
     if awards:
-        organization["award"] = awards
-    # FIX 4 v11: vatID garantito anche in build_schema_markup
+        business_entity["award"] = awards
     vat_id = local_seo.get("vat_id", "").strip()
     if vat_id:
-        organization["vatID"] = vat_id
-
-    servizi_list = [s.strip() for s in re.split(r"[,;\n·•\-]+", servizi) if s.strip()][:6]
+        business_entity["vatID"] = vat_id
+    # knowsAbout: split SOLO su separatori semantici (punto e virgola, newline, bullet)
+    # NON sulle virgole — evita frammentazione di frasi con liste interne
+    servizi_list = [s.strip() for s in re.split(r"[;\n·•]+", servizi) if s.strip() and len(s.strip()) > 8][:6]
     if servizi_list:
-        organization["knowsAbout"] = servizi_list
+        business_entity["knowsAbout"] = servizi_list
 
     # FIX 1 v11: Nodi Product con @id corti e name separato da award
     product_nodes = []
@@ -1070,13 +1058,13 @@ def build_schema_markup(
                     "name": domanda,
                     "acceptedAnswer": {
                         "@type": "Answer",
-                        "text": risposta[:500],
+                        "text": risposta,
                     },
                 })
         if main_entity:
             faq_node = {"@type": "FAQPage", "mainEntity": main_entity}
 
-    graph = [local_business, organization]
+    graph = [business_entity]
     graph.extend(product_nodes)
     if faq_node:
         graph.append(faq_node)
@@ -1143,6 +1131,61 @@ def build_ai_summary(azienda: str, servizi: str, local_seo: dict, fatti: str) ->
     return summary
 
 
+def extract_products_from_dato_chiave(generated: dict) -> list:
+    """
+    Estrae nomi prodotto reali dai dato_chiave dell'answer_first_page.
+    Fallback affidabile quando il debrief contiene frasi invece di elenchi prodotto.
+    Formato atteso: "Nome Prodotto: punteggio/info" o "Nome Prodotto — descrizione"
+    """
+    af = generated.get("answer_first_page", {})
+    sezioni = af.get("sezioni", [])
+    if not sezioni:
+        return []
+
+    products = []
+    seen: set = set()
+
+    for sez in sezioni:
+        dk = (sez.get("dato_chiave") or "").strip()
+        if not dk:
+            continue
+        # Estrai la parte prima di ":", "—", " - "
+        name = dk
+        for sep in (":", "—", " - ", " – "):
+            if sep in dk:
+                name = dk.split(sep)[0].strip()
+                break
+
+        # Filtri qualità: scarta se troppo corto/lungo o contiene anni/frasi
+        if len(name) < 4 or len(name) > 70:
+            continue
+        if re.search(r"\b\d{4}\b|\bdal\b|\bdegli\b|\bsolo\b|\bfin\b|\boltre\b", name, re.IGNORECASE):
+            continue
+        if re.search(r"\b(?:produce|coltiva|documenta|certificat|oltre|anni)\b", name, re.IGNORECASE):
+            continue
+
+        name_key = name.lower()
+        if name_key in seen:
+            continue
+        seen.add(name_key)
+
+        category = ""
+        for cat_key in CATEGORY_PRICE_MAP:
+            if cat_key in name_key:
+                category = cat_key.title()
+                break
+
+        products.append({
+            "name": name,
+            "description": (sez.get("risposta_diretta") or "")[:150],
+            "award": dk if ":" in dk or "—" in dk else "",
+            "category": category,
+            "priceRange": CATEGORY_PRICE_MAP.get(category.lower(), "€€"),
+        })
+
+    return products
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 6i: POST-PROCESS PIPELINE v11
 # FIX 6: reset internal_linking_suggestions prima di ogni run
@@ -1182,6 +1225,7 @@ def post_process(
     ai_products = (
         generated.get("prodotti")
         or generated.get("products")
+        or extract_products_from_dato_chiave(generated)
         or build_products_from_fatti(fatti, azienda)
     )
     if not ai_products and servizi:
@@ -1247,15 +1291,23 @@ def post_process(
     if first_sentence and len(first_sentence) <= 155:
         meta_desc = first_sentence
     elif first_sentence:
-        # Tronca alla parola intera più vicina a 152 char, aggiunge "."
-        truncated = first_sentence[:152].rsplit(" ", 1)[0].rstrip(",;:").rstrip()
-        meta_desc = truncated + "."
+        # Tronca all'ultima virgola prima di char 154 che lasci un frammento ≥60 char
+        # → produce una frase autonoma senza troncare a metà parola/complemento
+        candidate = first_sentence[:154]
+        comma_pos = candidate.rfind(",")
+        if comma_pos >= 60:
+            meta_desc = candidate[:comma_pos].rstrip() + "."
+        else:
+            meta_desc = candidate.rsplit(" ", 1)[0].rstrip(",;:").rstrip() + "."
     elif intro:
-        # Fallback: tronca intro alla parola intera, chiudi con punto
-        truncated = intro[:152].rsplit(" ", 1)[0].rstrip(",;:").rstrip()
-        meta_desc = truncated + "."
+        candidate = intro[:154]
+        comma_pos = candidate.rfind(",")
+        if comma_pos >= 60:
+            meta_desc = candidate[:comma_pos].rstrip() + "."
+        else:
+            meta_desc = candidate.rsplit(" ", 1)[0].rstrip(",;:").rstrip() + "."
     else:
-        meta_desc = f"{azienda} — {servizi[:100].split(',')[0].strip()}."
+        meta_desc = f"{azienda} — {servizi[:100].split(';')[0].strip()}."
     url_raw = local_seo.get("url", "").strip()
     if url_raw and not url_raw.startswith("http"):
         url_raw = f"https://www.{url_raw}"
@@ -1709,6 +1761,13 @@ def build_products_from_fatti(fatti: str, azienda: str = "") -> list:
             pending_awards.append(line.strip())
 
     for line in lines:
+        # Salta righe-frase: sono fatti aziendali, non nomi prodotto
+        # Un nome prodotto reale è breve (≤80 char) e non inizia con il nome azienda
+        if len(line) > 80:
+            continue
+        if azienda and line.lower().startswith(azienda.lower()[:6]):
+            continue
+
         line_lower = line.lower()
 
         if _PURE_AWARD_PATTERNS.search(line):
@@ -1731,7 +1790,7 @@ def build_products_from_fatti(fatti: str, azienda: str = "") -> list:
             raw_name = name_match.group(1).strip() if name_match else line[:60]
             prod_name = raw_name.title()
 
-        if not prod_name or len(prod_name) < 3 or prod_name in seen_names:
+        if not prod_name or len(prod_name) < 3 or len(prod_name) > 60 or prod_name in seen_names:
             continue
         seen_names.add(prod_name)
 
