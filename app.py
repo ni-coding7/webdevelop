@@ -283,16 +283,16 @@ PRICING = {
         "gpt-4o":       {"input": 0.00250, "output": 0.01000},
     },
     "anthropic": {
-        "claude-haiku-4-5":  {"input": 0.00100, "output": 0.00500},
+        "claude-haiku-4-5-20251001":  {"input": 0.00100, "output": 0.00500},
         "claude-sonnet-4-6": {"input": 0.00300, "output": 0.01500},
-        "claude-opus-4-6":   {"input": 0.01500, "output": 0.07500},
+        "claude-opus-4-7":   {"input": 0.01500, "output": 0.07500},
     }
 }
 
 MODEL_LABELS = {
-    "claude-haiku-4-5":  "Claude Haiku 4.5 💰 (Economico)",
+    "claude-haiku-4-5-20251001":  "Claude Haiku 4.5 💰 (Economico)",
     "claude-sonnet-4-6": "Claude Sonnet 4.6 🔋 (Raccomandato per GEO)",
-    "claude-opus-4-6":   "Claude Opus 4.6 💎 (Massima qualità)",
+    "claude-opus-4-7":   "Claude Opus 4.7 💎 (Massima qualità)",
     "gpt-4o-mini":       "GPT-4o Mini 💰",
     "gpt-4o":            "GPT-4o 🔋",
 }
@@ -301,9 +301,9 @@ MODEL_LABELS = {
 MODEL_MAX_TOKENS = {
     "gpt-4o-mini":       4096,
     "gpt-4o":            4096,
-    "claude-haiku-4-5":  8192,
+    "claude-haiku-4-5-20251001":  8192,
     "claude-sonnet-4-6": 8192,
-    "claude-opus-4-6":   8192,
+    "claude-opus-4-7":   8192,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2888,11 +2888,10 @@ def call_anthropic(api_key: str, model: str, system: str, user: str) -> tuple:
             max_tokens=max_tok,
             system=system,
             messages=[
-                {"role": "user",      "content": user},
-                {"role": "assistant", "content": "{"}  # Prefill: forza JSON, elimina preamble
+                {"role": "user", "content": user}
             ]
         )
-        content = "{" + resp.content[0].text
+        content = resp.content[0].text
         return content, resp.usage.input_tokens, resp.usage.output_tokens
     except ImportError:
         return None, 0, 0
