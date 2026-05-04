@@ -123,7 +123,8 @@ import time
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
-HISTORY_FILE = "clienti_history.json"
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clienti_history.json")
+API_KEYS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_keys.json")
 
 
 def load_history() -> list:
@@ -137,11 +138,31 @@ def load_history() -> list:
     return []
 
 
-def save_history(history: list) -> None:
-    """Salva lo storico clienti su disco (max 50 clienti)."""
+def save_history(history: list, max_items: int = 50) -> None:
+    """Salva lo storico clienti su disco."""
     try:
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history[-50:], f, ensure_ascii=False, indent=2)
+            json.dump(history[-max_items:], f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def load_api_keys() -> dict:
+    """Carica le API key salvate da disco."""
+    try:
+        if os.path.exists(API_KEYS_FILE):
+            with open(API_KEYS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def save_api_keys(keys: dict) -> None:
+    """Salva le API key su disco."""
+    try:
+        with open(API_KEYS_FILE, "w", encoding="utf-8") as f:
+            json.dump(keys, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
@@ -312,10 +333,15 @@ MODEL_MAX_TOKENS = {
 def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
-def estimate_cost(input_tokens: int, output_tokens: int, provider: str, model: str) -> float:
+def estimate_cost(input_tokens: int, output_tokens: int, provider: str, model: str,
+                  cache_read_tokens: int = 0, cache_created_tokens: int = 0) -> float:
     try:
         p = PRICING[provider][model]
-        return (input_tokens / 1000 * p["input"]) + (output_tokens / 1000 * p["output"])
+        cost = (input_tokens / 1000 * p["input"]) + (output_tokens / 1000 * p["output"])
+        if provider == "anthropic" and (cache_read_tokens or cache_created_tokens):
+            cost += (cache_created_tokens / 1000 * p["input"] * 1.25)
+            cost += (cache_read_tokens    / 1000 * p["input"] * 0.10)
+        return cost
     except KeyError:
         return 0.0
 
@@ -497,13 +523,18 @@ def compute_quality_score(data: dict, local_seo: dict, source_urls: list) -> dic
     eeat = 0
     seo  = 0
     geo  = 0
+    # ── E-E-A-T ─────────────────────────────────────────────────────────────
     if source_urls:                                      eeat += 2
     if local_seo.get("indirizzo","").strip():            eeat += 2
     if local_seo.get("linkedin","").strip():             eeat += 1
     if local_seo.get("url","").strip():                  eeat += 1
     home = data.get("home", {})
-    if home.get("fonti_utilizzate"):                     eeat += 2
+    # Fonti scraping reali valgono di più delle fonti AI-generate
+    meta_f = data.get("_meta_fonti", {})
+    if meta_f.get("fonti_scraping_reale"):               eeat += 2
+    elif home.get("fonti_utilizzate"):                   eeat += 1
     if data.get("schema_markup"):                        eeat += 2
+    # ── SEO ──────────────────────────────────────────────────────────────────
     if home.get("h1"):                                   seo  += 2
     serv = data.get("pagina_servizio", {})
     if serv.get("h1"):                                   seo  += 1
@@ -513,40 +544,72 @@ def compute_quality_score(data: dict, local_seo: dict, source_urls: list) -> dic
     if serv.get("come_funziona",{}).get("steps"):        seo  += 1
     h1 = home.get("h1","")
     if h1 and len(h1) < 20:                              seo  -= 1
+    # Bonus SEO: intro sufficientemente lunga (>150 parole) e contiene numeri
+    intro_text = home.get("intro","")
+    if len(intro_text.split()) >= 150:                   seo  += 1
+    if re.search(r"\b\d+[\.,]?\d*\s*(?:%|€|km|ettari|ulivi|anni|premi|clienti|mesi|ore)\b", intro_text, re.IGNORECASE):
+        seo += 1
+    # Penalità SEO: cliché nella blacklist trovati nel testo
+    full_text = intro_text + " " + (serv.get("intro",""))
+    cliche_hits = sum(1 for c in CLICHE_BLACKLIST if c.lower() in full_text.lower())
+    if cliche_hits >= 2:                                 seo  -= 2
+    elif cliche_hits == 1:                               seo  -= 1
+
+    # ── GEO ──────────────────────────────────────────────────────────────────
     if data.get("ai_summary"):                           geo  += 2
     if data.get("entities"):                             geo  += 2
     if data.get("schema_markup"):
-        org = data["schema_markup"].get("organization",{})
-        if org.get("knowsAbout"):                        geo  += 1
-        if org.get("sameAs"):                            geo  += 1
-    meta = data.get("_meta_fonti",{})
+        _graph = data["schema_markup"].get("@graph", [])
+        _entity = _graph[0] if _graph else {}
+        if _entity.get("knowsAbout"):                    geo  += 1
+        if _entity.get("sameAs"):                        geo  += 1
+        if _entity.get("foundingDate"):                  geo  += 1
+        # Bonus: Product nodes con award/review aumentano citabilità AI
+        product_nodes = [n for n in _graph if n.get("@type") == "Product"]
+        if product_nodes:                                geo  += 1
+    meta = data.get("_meta_fonti", {})
     if meta.get("geo_entities"):                         geo  += 2
-    if meta.get("rag_attivo"):                           geo  += 1
+    if meta.get("fonti_scraping_reale"):                 geo  += 2
+    elif meta.get("rag_attivo"):                         geo  += 1
     if meta.get("scraping_attivo"):                      geo  += 1
+
     eeat = min(10, max(0, eeat))
     seo  = min(10, max(0, seo))
     geo  = min(10, max(0, geo))
+
+    # ── Risk level: basato su claim rimossi E cliché trovati ─────────────────
     total_removed = 0
     total_generic = 0
     for key in ["home", "pagina_servizio"]:
         dv = data.get(key, {}).get("data_validation", {})
         total_removed += len(dv.get("removed_claims", []))
         total_generic += len(dv.get("generic_fields",  []))
-    if total_removed >= 3:
+    if total_removed >= 3 or cliche_hits >= 3:
         risk = "high"
-    elif total_removed >= 1 or total_generic >= 3:
+    elif total_removed >= 1 or total_generic >= 3 or cliche_hits >= 1:
         risk = "medium"
     else:
         risk = "low"
-    # Modulo 4 v14: AI-Ready score — misura ottimizzazione per AI generative
+
+    # ── AI-Ready ─────────────────────────────────────────────────────────────
     ai_ready = 0
     if data.get("answer_first_page"):               ai_ready += 3
     if data.get("citation_block"):                   ai_ready += 3
     if data.get("offsite_geo_plan"):                 ai_ready += 2
-    if data.get("ai_summary"):                       ai_ready += 1
-    if meta.get("rag_attivo"):                       ai_ready += 1
+    if data.get("ai_summary") and len(data.get("ai_summary","")) > 100:
+        ai_ready += 1
+    if meta.get("fonti_scraping_reale"):             ai_ready += 1
+    # v15: nuovi moduli content marketing
+    if data.get("blog_pillar"):                      ai_ready += 1
+    if data.get("press_release"):                    ai_ready += 1
     ai_ready = min(10, max(0, ai_ready))
-    return {"eeat": eeat, "seo": seo, "geo": geo, "ai_ready": ai_ready, "risk_level": risk}
+
+    return {
+        "eeat": eeat, "seo": seo, "geo": geo, "ai_ready": ai_ready,
+        "risk_level": risk,
+        "cliche_hits": cliche_hits,
+        "product_nodes": len(product_nodes) if data.get("schema_markup") else 0,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -670,18 +733,24 @@ def extract_social_urls(scrape_data: dict) -> list:
 
 
 def build_same_as(local_seo: dict, extra_socials: list = None) -> list:
-    same_as = []
-    url      = local_seo.get("url","").strip()
-    linkedin = local_seo.get("linkedin","").strip()
-    lat      = local_seo.get("gps_lat","").strip()
-    lon      = local_seo.get("gps_lon","").strip()
-    if url:      same_as.append(url)
-    if linkedin: same_as.append(linkedin)
+    """
+    sameAs deve puntare a profili TERZI (LinkedIn, Google Maps, social)
+    — mai al sito stesso (url), che è già in "url" del nodo principale.
+    """
+    same_as  = []
+    own_url  = local_seo.get("url", "").strip().rstrip("/")
+    linkedin = local_seo.get("linkedin", "").strip()
+    lat      = local_seo.get("gps_lat", "").strip()
+    lon      = local_seo.get("gps_lon", "").strip()
+    if linkedin:
+        same_as.append(linkedin)
     if lat and lon:
         maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
         same_as.append(maps_url)
     if extra_socials:
-        same_as.extend([s for s in extra_socials if s and s not in same_as])
+        for s in extra_socials:
+            if s and s.rstrip("/") != own_url and s not in same_as:
+                same_as.append(s)
     return same_as
 
 
@@ -707,6 +776,23 @@ BUSINESS_TYPE_MAP = {
     "scuola": "School", "università": "EducationalOrganization",
     "accademia": "EducationalOrganization", "corso": "EducationalOrganization",
     "artigiano": "LocalBusiness", "manifattura": "LocalBusiness", "produzione": "LocalBusiness",
+    # v15: nuovi tipi generici ad alto utilizzo
+    "evento": "Event", "eventi": "Event", "conferenza": "Event",
+    "ricetta": "Recipe", "ricette": "Recipe",
+    "tutorial": "HowTo", "how-to": "HowTo",
+    "app": "SoftwareApplication", "applicazione": "SoftwareApplication", "saas": "SoftwareApplication",
+    "immobiliare": "RealEstateAgent", "agenzia immobiliare": "RealEstateAgent",
+    "assicurazione": "InsuranceAgency", "assicurazioni": "InsuranceAgency",
+    "museo": "Museum", "galleria": "ArtGallery",
+    "catering": "CateringBusiness", "ristorazione aziendale": "CateringBusiness",
+    "concessionaria": "AutoDealer", "automotive": "AutoDealer",
+    "officina": "AutoRepair", "carrozzeria": "AutoRepair",
+    "traslochi": "MovingCompany", "trasloco": "MovingCompany",
+    "pulizie": "HousePainter", "impresa di pulizie": "LocalBusiness",
+    "psicologo": "MedicalBusiness", "psicologa": "MedicalBusiness",
+    "nutrizionista": "MedicalBusiness", "dietista": "MedicalBusiness",
+    "azienda agricola": "LocalBusiness", "fattoria": "LocalBusiness",
+    "ecommerce": "Store", "e-commerce": "Store",
 }
 
 def infer_schema_type(servizi: str, contesto: str = "") -> str:
@@ -902,6 +988,9 @@ def build_schema_markup(
     vat_id = local_seo.get("vat_id", "").strip()
     if vat_id:
         business_entity["vatID"] = vat_id
+    anno_fondazione = local_seo.get("anno_fondazione", "").strip()
+    if anno_fondazione:
+        business_entity["foundingDate"] = anno_fondazione
     # knowsAbout: split SOLO su separatori semantici (punto e virgola, newline, bullet)
     # NON sulle virgole — evita frammentazione di frasi con liste interne
     servizi_list = [s.strip() for s in re.split(r"[;\n·•]+", servizi) if s.strip() and len(s.strip()) > 8][:6]
@@ -1078,53 +1167,51 @@ def build_schema_markup(
 # ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 6h: AI SUMMARY BUILDER
 # ─────────────────────────────────────────────────────────────────────────────
-def build_ai_summary(azienda: str, servizi: str, local_seo: dict, fatti: str) -> str:
+def build_ai_summary(azienda: str, servizi: str, local_seo: dict, fatti: str, generated: dict = None) -> str:
     """
-    Genera ai_summary ottimizzato per citabilità da AI (ChatGPT, Perplexity, Google SGE).
-
-    Struttura GEO-discoverability (FIX 4 v14):
-      (1) Chi è: brand + anno fondazione se disponibile
-      (2) Cosa fa: servizio principale + almeno un dato numerico o certificazione reale
-      (3) Dove opera: riferimento geografico preciso
-      (4) Perché è diversa: un elemento verificabile dalle fonti
-
-    ai_summary: "Blocco testo di 120-150 parole, strutturato per essere
-    citato da AI come ChatGPT, Perplexity e Google SGE. Deve contenere:
-    (1) chi è l'azienda in una frase con anno fondazione se disponibile,
-    (2) cosa fa esattamente con almeno un dato numerico o certificazione reale,
-    (3) dove opera con riferimento geografico preciso,
-    (4) perché è diversa in UNA frase con elemento verificabile dalle fonti RAG o dal debrief.
-    NO cliché, NO aggettivi generici. Ogni claim deve essere verificabile
-    dalle fonti RAG o dal debrief."
+    Genera ai_summary ottimizzato per citabilità AI (ChatGPT, Perplexity, Google SGE).
+    Se il contenuto home è già stato generato, usa le prime 2 frasi dell'intro
+    (già ottimizzato E-E-A-T) invece di un template sintetico.
+    Costo aggiuntivo API: zero.
     """
+    # Strategia 1: usa home.intro già generato — massima qualità, zero costo extra
+    if generated:
+        intro = (generated.get("home") or {}).get("intro", "")
+        if intro and len(intro) > 100:
+            sentences = re.split(r"(?<=[.!?])\s+", intro.strip())
+            # Prendi le prime 2 frasi complete (≤300 char totali)
+            summary = ""
+            for s in sentences[:3]:
+                candidate = (summary + " " + s).strip() if summary else s
+                if len(candidate) <= 300:
+                    summary = candidate
+                else:
+                    break
+            if summary and len(summary) >= 80:
+                return summary if summary.endswith(".") else summary + "."
+
+    # Strategia 2: citation_block versione breve già generata
+    if generated:
+        cb = (generated.get("citation_block") or {}).get("versione_breve", "")
+        if cb and len(cb) >= 80:
+            return cb if cb.endswith(".") else cb + "."
+
+    # Fallback: template (solo se nessun contenuto disponibile)
     addr = parse_address(local_seo.get("indirizzo", ""))
     city = addr.get("addressLocality", "")
-    province = addr.get("addressRegion", "")
-    location_str = f"{city} ({province})" if city and province else city
-
     anno = local_seo.get("anno_fondazione", "").strip()
-    primo_servizio = servizi.split(",")[0].strip() if servizi else ""
+    primo_servizio = re.split(r"[,;\n·•]", servizi)[0].strip() if servizi else ""
+    fatto_lines = [l.strip().strip("·•-\"'") for l in fatti.split("\n")
+                   if l.strip() and len(l.strip()) < 80]
 
-    fatto_lines = [l.strip().strip("·•-\"'") for l in fatti.split("\n") if l.strip()]
-
-    # (1) Chi è — con anno se disponibile
-    if anno:
-        chi_e = f"Dal {anno}, {azienda}"
-    else:
-        chi_e = azienda
-
-    # (2) Cosa fa — primo servizio
+    chi_e   = f"Dal {anno}, {azienda}" if anno else azienda
     cosa_fa = f"specializzata in {primo_servizio}" if primo_servizio else ""
+    dove    = f"con sede a {city}" if city else ""
+    perche  = fatto_lines[0] if fatto_lines else ""
 
-    # (3) Dove opera — indirizzo geografico preciso
-    dove = f"con sede a {location_str}" if location_str else ""
-
-    # (4) Perché è diversa — primo fatto citabile (dato numerico o certificazione)
-    perche = fatto_lines[0] if fatto_lines else ""
-
-    parti = [p for p in [chi_e, cosa_fa, dove, perche] if p]
+    parti   = [p for p in [chi_e, cosa_fa, dove, perche] if p]
     summary = ", ".join(parti)
-    if summary and not summary.endswith("."):
+    if not summary.endswith("."):
         summary += "."
     if len(summary) > 300:
         summary = summary[:297].rsplit(" ", 1)[0].rstrip(",") + "."
@@ -1238,7 +1325,7 @@ def post_process(
                                                 products_list=generated.get("products") or ai_products)
 
     # 5. AI Summary
-    generated["ai_summary"] = build_ai_summary(azienda, servizi, local_seo, fatti)
+    generated["ai_summary"] = build_ai_summary(azienda, servizi, local_seo, fatti, generated=generated)
 
     # 6. sameAs + P.IVA + Social Hub
     vat_id = extract_vat_id(_scrape)
@@ -2133,7 +2220,38 @@ def score_source_authority(url: str) -> int:
     return min(score, 10)
 
 
-def get_external_evidence(azienda: str, contesto: str = "") -> dict:
+def search_with_tavily(api_key: str, query: str, max_results: int = 8) -> list:
+    """Ricerca web via Tavily API — risultati più ricchi e affidabili di DuckDuckGo."""
+    try:
+        from urllib.request import Request, urlopen
+        payload = json.dumps({
+            "api_key": api_key,
+            "query": query,
+            "search_depth": "advanced",
+            "max_results": max_results,
+            "include_answer": False,
+        }).encode("utf-8")
+        req = Request(
+            "https://api.tavily.com/search",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        results = []
+        for r in data.get("results", []):
+            results.append({
+                "href": r.get("url", ""),
+                "title": r.get("title", ""),
+                "body": (r.get("content", "") or r.get("raw_content", "") or "")[:500],
+            })
+        return results
+    except Exception:
+        return []
+
+
+def get_external_evidence(azienda: str, contesto: str = "", search_provider: str = "duckduckgo", tavily_api_key: str = "") -> dict:
     evidence = {
         "premi_riconoscimenti":  [],
         "certificazioni_qualita": [],
@@ -2144,13 +2262,7 @@ def get_external_evidence(azienda: str, contesto: str = "") -> dict:
     }
     if not azienda:
         return evidence
-    try:
-        from duckduckgo_search import DDGS
-    except ImportError:
-        evidence["errori"].append(
-            "duckduckgo-search non installato. Esegui: pip install duckduckgo-search"
-        )
-        return evidence
+
     azienda_lower = azienda.lower().strip()
     queries = {
         "premi_riconoscimenti":
@@ -2161,6 +2273,61 @@ def get_external_evidence(azienda: str, contesto: str = "") -> dict:
             f'"{azienda}" storia fondazione sede team',
     }
     seen_urls = set()
+
+    # ── Tavily path ──────────────────────────────────────────────────────────
+    if search_provider == "tavily" and tavily_api_key:
+        for categoria, query in queries.items():
+            try:
+                raw_results = search_with_tavily(tavily_api_key, query, max_results=8)
+                if not raw_results:
+                    evidence["errori"].append(f"Tavily: nessun risultato per '{categoria}'")
+                    continue
+            except Exception as e:
+                evidence["errori"].append(f"Tavily '{categoria}': {str(e)[:100]}")
+                continue
+            valid_results = []
+            for r in raw_results:
+                url   = r.get("href", "") or r.get("url", "")
+                title = (r.get("title", "") or "").lower()
+                body  = (r.get("body", "") or "").lower()
+                if not is_valid_url(url):
+                    evidence["url_scartati"].append(url)
+                    continue
+                if azienda_lower not in title and azienda_lower not in body:
+                    evidence["url_scartati"].append(url)
+                    continue
+                valid_results.append(r)
+            valid_results.sort(
+                key=lambda r: score_source_authority(r.get("href", "") or r.get("url", "")),
+                reverse=True
+            )
+            for r in valid_results:
+                url = r.get("href", "") or r.get("url", "")
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                entry = {
+                    "titolo":    r.get("title", ""),
+                    "snippet":   r.get("body", ""),
+                    "url":       url,
+                    "categoria": categoria,
+                    "autorità":  score_source_authority(url),
+                }
+                evidence[categoria].append(entry)
+                evidence["fonti_aggregate"].append(entry)
+            time.sleep(0.3)
+        evidence["fonti_aggregate"].sort(key=lambda x: x["autorità"], reverse=True)
+        evidence["fonti_aggregate"] = evidence["fonti_aggregate"][:12]
+        return evidence
+
+    # ── DuckDuckGo path (fallback) ────────────────────────────────────────────
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        evidence["errori"].append(
+            "duckduckgo-search non installato. Esegui: pip install duckduckgo-search"
+        )
+        return evidence
     try:
         with DDGS() as ddgs:
             for categoria, query in queries.items():
@@ -2540,19 +2707,19 @@ def prompt_home(ctx: str, lingua: str = "italiano") -> str:
 
 {lang_block}SEGNALI E-E-A-T OBBLIGATORI NEL TESTO (FIX 5 v14):
 - Se disponibile, cita l'anno di fondazione nel primo paragrafo (es. "Dal 2008, [Azienda]...")
-- Se disponibili certificazioni/premi dalle fonti RAG, citali per esteso almeno una volta (es. "certificata DOP Umbria dal 2015")
+- Se disponibili certificazioni/premi dalle fonti RAG, citali per esteso almeno una volta (es. "certificata ISO 9001 dal 2012", "premiata da [ente] nel [anno]", "DOP dal 2015")
 - Evita pronomi generici: usa sempre il nome del brand o "il team di [Brand]"
-- Ogni claim numerico deve avere contesto: non "oltre 500 clienti" ma "oltre 500 clienti serviti in Umbria e Toscana dal 2010"
+- Ogni claim numerico deve avere contesto: non "oltre 500 clienti" ma "oltre 500 clienti serviti in [area geografica] dal [anno]"
 
 Genera SOLO il blocco "home". Ogni campo di prosa (intro, body) deve essere
 UN TESTO NARRATIVO CONTINUATIVO, non un elenco di frasi nominali.
 
 ESEMPIO DEL FORMATO ATTESO PER IL CAMPO "intro" (replica lo stile):
-"Dal 1890 [Azienda] produce [prodotto] nella [zona geografica], dove la
-combinazione di [fattore 1] e [fattore 2] ha dato vita a una linea riconosciuta
-dalle guide di settore — nel 2023 con le tre foglie del Gambero Rosso.
-L'approccio tecnico, centrato su [processo specifico], consente di mantenere
-[parametro tecnico verificato] ben sotto la soglia richiesta dalla categoria."
+"Dal [anno] [Azienda] offre [prodotto/servizio] a [mercato/territorio], dove la
+combinazione di [competenza 1] e [competenza 2] ha dato vita a un metodo
+riconosciuto nel settore — [riconoscimento o dato verificabile dalle fonti RAG].
+L'approccio, centrato su [processo specifico], consente di garantire
+[risultato o parametro verificato] ai clienti."
 
 Rispondi ESCLUSIVAMENTE con questo JSON (tutti i campi stringa in {lingua},
 prosa fluida, zero frasi-elenco):
@@ -2570,7 +2737,14 @@ prosa fluida, zero frasi-elenco):
     }},
     "cta": "1 frase imperativa specifica al topic (non generica 'contattaci')",
     "fonti_utilizzate": ["URL_reale_1", "URL_reale_2"]
-  }}
+  }},
+  "products": [
+    {{
+      "name": "Nome commerciale esatto del prodotto/servizio (max 50 char, SOLO il nome, zero descrizioni)",
+      "category": "categoria merceologica breve (es. extravergine, dop, cosmetica, consulenza)",
+      "award": "premio o certificazione associata se citata nelle fonti, altrimenti stringa vuota"
+    }}
+  ]
 }}"""
 
 
@@ -2580,9 +2754,9 @@ def prompt_servizio(ctx: str, lingua: str = "italiano") -> str:
 
 {lang_block}SEGNALI E-E-A-T OBBLIGATORI NEL TESTO (FIX 5 v14):
 - Se disponibile, cita l'anno di fondazione nel primo paragrafo (es. "Dal 2008, [Azienda]...")
-- Se disponibili certificazioni/premi dalle fonti RAG, citali per esteso almeno una volta (es. "certificata DOP Umbria dal 2015")
+- Se disponibili certificazioni/premi dalle fonti RAG, citali per esteso almeno una volta (es. "certificata ISO 9001 dal 2012", "premiata da [ente] nel [anno]", "DOP dal 2015")
 - Evita pronomi generici: usa sempre il nome del brand o "il team di [Brand]"
-- Ogni claim numerico deve avere contesto: non "oltre 500 clienti" ma "oltre 500 clienti serviti in Umbria e Toscana dal 2010"
+- Ogni claim numerico deve avere contesto: non "oltre 500 clienti" ma "oltre 500 clienti serviti in [area geografica] dal [anno]"
 
 Genera SOLO il blocco "pagina_servizio". L'intro deve essere prosa fluida;
 SOLO i campi "steps" e "lista" possono contenere elementi brevi stile elenco.
@@ -2647,15 +2821,20 @@ di PROSA FLUIDA, non elenchi):
 }}"""
 
 
-def prompt_faq_hybrid(ctx: str, lingua: str = "italiano") -> str:
+def prompt_faq_hybrid(ctx: str, lingua: str = "italiano", faq_count: int = 5) -> str:
     """
     INT 3 — Hybrid Mix FAQ: SEO (Featured Snippet) + GEO (motori generativi).
-    FIX 2 v11: lang_lock ripetuto all'inizio.
+    v15: faq_count configurabile (3-15).
     """
     lang_block = _lang_lock_block(lingua)
+    # Genera gli item aggiuntivi dal 2° in poi
+    extra_items = ""
+    for i in range(2, faq_count + 1):
+        extra_items += f',\n    {{"domanda": "Q{i} in {lingua}", "risposta": "100-150 parole prosa ibrida SEO+GEO in {lingua}", "fonte": ""}}'
+
     return f"""{ctx}
 
-{lang_block}Genera SOLO il blocco "faq" con 5 domande usando la logica HYBRID MIX FAQ:
+{lang_block}Genera SOLO il blocco "faq" con {faq_count} domande usando la logica HYBRID MIX FAQ:
 
 STRUTTURA OBBLIGATORIA DI OGNI RISPOSTA:
   PARTE 1 — AFFERMAZIONE DIRETTA (Featured Snippet):
@@ -2664,36 +2843,35 @@ STRUTTURA OBBLIGATORIA DI OGNI RISPOSTA:
 
   PARTE 2 — APPROFONDIMENTO ENTITÀ (GEO):
     I paragrafi successivi intessono entità correlate: date storiche,
-    premi con anno, denominazioni DOP/IGP, termini tecnici (polifenoli, cultivar,
-    acidità, perossidi), nomi di guide (Flos Olei, Gambero Rosso).
+    premi con anno, certificazioni di settore, termini tecnici specifici del
+    settore del brand, nomi di enti certificatori o guide rilevanti.
     Il tono è narrativo e umano — nessun elenco puntato nella risposta.
 
 VINCOLO CRITICO: dati numerici (anni, premi, punteggi) solo se nelle fonti RAG/debrief.
 In assenza di dato: flow discorsivo SENZA inventare soglie o quantità.
 
-Rispondi ESCLUSIVAMENTE con questo JSON (5 coppie Q&A in {lingua}, risposte 100-150 parole di PROSA):
+Rispondi ESCLUSIVAMENTE con questo JSON ({faq_count} coppie Q&A in {lingua}, risposte 100-150 parole di PROSA):
 {{
   "faq": [
     {{
       "domanda": "Query naturale reale (Come/Cosa/Quanto/Perché/Chi/Dove/Qual è) in {lingua}",
       "risposta": "Frase diretta di risposta immediata (Featured Snippet). Seguono 2-3 periodi densi di entità correlate. Prosa fluida, nessun elenco.",
       "fonte": "URL_reale_o_stringa_vuota"
-    }},
-    {{"domanda": "Q2 in {lingua}", "risposta": "100-150 parole prosa ibrida SEO+GEO in {lingua}", "fonte": ""}},
-    {{"domanda": "Q3 in {lingua}", "risposta": "100-150 parole prosa ibrida SEO+GEO in {lingua}", "fonte": ""}},
-    {{"domanda": "Q4 in {lingua}", "risposta": "100-150 parole prosa ibrida SEO+GEO in {lingua}", "fonte": ""}},
-    {{"domanda": "Q5 in {lingua}", "risposta": "100-150 parole prosa ibrida SEO+GEO in {lingua}", "fonte": ""}}
+    }}{extra_items}
   ]
 }}"""
 
 
-def prompt_schema(ctx: str, azienda: str, local_seo: dict, faq_data: list = None, lingua: str = "italiano") -> str:
+def prompt_schema(ctx: str, azienda: str, local_seo: dict, faq_data: list = None, lingua: str = "italiano", servizi: str = "") -> str:
     """FIX 2 v11: lang_lock aggiunto anche al prompt schema."""
     lang_block = _lang_lock_block(lingua)
     indirizzo = local_seo.get("indirizzo", "")
     url_sito  = local_seo.get("url", "https://www.esempio.it")
     linkedin  = local_seo.get("linkedin", "")
-    schema_type = "LocalBusiness" if indirizzo.strip() else "Organization"
+    # Usa infer_schema_type per @type semantico (Store, Winery, ecc.)
+    # Se indirizzo presente → garantisce LocalBusiness come base; altrimenti inferisce dal settore
+    inferred = infer_schema_type(servizi, ctx[:500]) if servizi else "LocalBusiness"
+    schema_type = inferred if indirizzo.strip() or inferred != "LocalBusiness" else "Organization"
 
     orari = local_seo.get("orari", {})
     orari_lines = []
@@ -2740,15 +2918,14 @@ Rispondi ESCLUSIVAMENTE con questo JSON:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def prompt_answer_first(ctx: str, lingua: str = "italiano") -> str:
-    return f"""VINCOLO PRIMARIO INVIOLABILE: rispondi SOLO in {lingua}.
+    return f"""{ctx}
+
+VINCOLO PRIMARIO INVIOLABILE: rispondi SOLO in {lingua}.
 
 Sei un esperto di Generative Engine Optimization (GEO).
 Il tuo obiettivo è generare contenuti che le AI generative
 (ChatGPT, Perplexity, Claude, Google AI Overview) citano come fonte
 autorevole quando un utente fa una domanda sul settore.
-
-CONTESTO AZIENDA:
-{ctx}
 
 REGOLA FONDAMENTALE — ANSWER-FIRST FORMAT:
 Ogni sezione deve iniziare con la RISPOSTA DIRETTA alla domanda,
@@ -2786,7 +2963,9 @@ Rispondi SOLO con il JSON valido, zero testo fuori dal JSON."""
 
 
 def prompt_citation_block(ctx: str, lingua: str = "italiano") -> str:
-    return f"""VINCOLO PRIMARIO INVIOLABILE: rispondi SOLO in {lingua}.
+    return f"""{ctx}
+
+VINCOLO PRIMARIO INVIOLABILE: rispondi SOLO in {lingua}.
 
 Sei un esperto di AI Citation Optimization.
 Devi generare il "Citation Block": un testo di 150-200 parole
@@ -2799,9 +2978,6 @@ Le AI citano un testo quando:
 3. Ha una frase di differenziazione unica e specifica
 4. Ogni frase è autonoma e informativa anche fuori contesto
 5. Non contiene frasi pubblicitarie o cliché
-
-CONTESTO AZIENDA:
-{ctx}
 
 Genera un JSON con questa struttura:
 {{
@@ -2831,15 +3007,14 @@ Rispondi SOLO con JSON valido."""
 
 
 def prompt_offsite_geo(ctx: str, lingua: str = "italiano") -> str:
-    return f"""VINCOLO PRIMARIO INVIOLABILE: rispondi SOLO in {lingua}.
+    return f"""{ctx}
+
+VINCOLO PRIMARIO INVIOLABILE: rispondi SOLO in {lingua}.
 
 Sei un esperto di Generative Engine Optimization off-site.
 Le AI generative citano brand che compaiono in MOLTE fonti terze
 autorevoli — non solo sul proprio sito. Il tuo compito è generare
 un piano operativo CONCRETO e SPECIFICO per questo brand.
-
-CONTESTO AZIENDA:
-{ctx}
 
 Per ogni azione, devi essere SPECIFICO: non "registrati su directory"
 ma "registrati su Infobel.it — compila questi campi: nome, P.IVA,
@@ -2910,6 +3085,251 @@ Rispondi SOLO con JSON valido."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SEZIONE 11c: PROMPT MODULARI v15 — Blog Pillar, Press Release, Competitor GEO
+# ─────────────────────────────────────────────────────────────────────────────
+
+def prompt_blog_pillar(ctx: str, lingua: str = "italiano") -> str:
+    """v15 — Genera piano editoriale blog: 1 pillar article + 3 cluster articoli."""
+    lang_block = _lang_lock_block(lingua)
+    return f"""{ctx}
+
+{lang_block}Sei un content strategist esperto di GEO e SEO topical authority.
+Il tuo obiettivo è creare un piano editoriale che aumenti la visibilità del brand
+nei motori AI attraverso una struttura pillar-cluster.
+
+LOGICA:
+- Il PILLAR copre il topic principale in modo esaustivo (2000-3000 parole).
+- I 3 CLUSTER coprono sotto-topic specifici e linkano al pillar.
+- Ogni articolo deve rispondere a query conversazionali reali degli utenti.
+- Tutti i titoli e i contenuti devono evitare i cliché dalla blacklist.
+
+Rispondi ESCLUSIVAMENTE con questo JSON in {lingua}:
+{{
+  "blog_pillar": {{
+    "pillar": {{
+      "titolo": "Titolo SEO long-tail max 60 char — keyword principale + qualificatore",
+      "meta_description": "Meta 150-155 char — keyword + beneficio concreto per il lettore",
+      "url_slug": "slug-seo-ottimizzato-lowercase-con-trattini",
+      "keyword_principale": "keyword long-tail principale (3-5 parole)",
+      "keyword_secondarie": ["keyword 2", "keyword 3", "keyword 4", "keyword 5"],
+      "query_ai_target": "La domanda conversazionale principale per cui questo articolo verrebbe citato da un AI",
+      "lunghezza_target": "2000-3000 parole",
+      "struttura": [
+        {{
+          "h2": "H2 con keyword secondaria — descrive chiaramente il sotto-topic",
+          "contenuto_indicativo": "Cosa coprire in questa sezione in 2-3 righe, basandosi sui dati disponibili",
+          "word_count_target": "300-400"
+        }},
+        {{
+          "h2": "H2 secondo sotto-topic con dato/qualificatore",
+          "contenuto_indicativo": "Cosa coprire",
+          "word_count_target": "300-400"
+        }},
+        {{
+          "h2": "H2 terzo sotto-topic — differenziazione o case study",
+          "contenuto_indicativo": "Cosa coprire",
+          "word_count_target": "300-400"
+        }},
+        {{
+          "h2": "H2 quarto sotto-topic — guida pratica o FAQ integrate",
+          "contenuto_indicativo": "Cosa coprire",
+          "word_count_target": "300-400"
+        }}
+      ],
+      "faq_integrate": [
+        "Domanda FAQ 1 in stile conversazionale AI",
+        "Domanda FAQ 2",
+        "Domanda FAQ 3"
+      ],
+      "eeat_signals_da_inserire": [
+        "Segnale E-E-A-T 1 dal debrief da citare nel testo",
+        "Segnale E-E-A-T 2"
+      ],
+      "internal_links_in_uscita": [
+        "Pagina servizi del brand (aggancia il lettore verso conversione)",
+        "Pagina FAQ (riduce bounce rate)"
+      ]
+    }},
+    "cluster": [
+      {{
+        "titolo": "Titolo cluster 1 — sotto-topic specifico del pillar",
+        "meta_description": "Meta 150-155 char",
+        "url_slug": "slug-cluster-1",
+        "keyword_target": "keyword specifica del cluster 1",
+        "angolo_unico": "Cosa rende questo articolo diverso dal pillar e dagli altri cluster",
+        "query_ai_target": "Domanda conversazionale specifica per questo cluster",
+        "sezioni_h2": ["H2 sezione 1", "H2 sezione 2", "H2 sezione 3"],
+        "link_al_pillar": "Anchor text + contesto dove questo cluster linka al pillar"
+      }},
+      {{
+        "titolo": "Titolo cluster 2",
+        "meta_description": "Meta cluster 2",
+        "url_slug": "slug-cluster-2",
+        "keyword_target": "keyword cluster 2",
+        "angolo_unico": "Angolo unico cluster 2",
+        "query_ai_target": "Query AI cluster 2",
+        "sezioni_h2": ["H2 sezione 1", "H2 sezione 2", "H2 sezione 3"],
+        "link_al_pillar": "Come linka al pillar"
+      }},
+      {{
+        "titolo": "Titolo cluster 3",
+        "meta_description": "Meta cluster 3",
+        "url_slug": "slug-cluster-3",
+        "keyword_target": "keyword cluster 3",
+        "angolo_unico": "Angolo unico cluster 3",
+        "query_ai_target": "Query AI cluster 3",
+        "sezioni_h2": ["H2 sezione 1", "H2 sezione 2", "H2 sezione 3"],
+        "link_al_pillar": "Come linka al pillar"
+      }}
+    ],
+    "content_calendar_note": "Suggerimento: pubblica il pillar per primo, poi i 3 cluster entro 4-6 settimane."
+  }}
+}}
+
+REGOLE ANTI-HALLUCINATION:
+- Keyword e titoli devono essere realistici per il settore specifico del brand
+- I contenuti indicativi si basano SOLO su dati presenti nel contesto
+- Gli angoli unici devono differenziarsi realmente, non essere varianti dello stesso topic
+Rispondi SOLO con JSON valido."""
+
+
+def prompt_press_release(ctx: str, lingua: str = "italiano") -> str:
+    """v15 — Genera un comunicato stampa professionale ottimizzato per distribuzione digitale e citabilità AI."""
+    lang_block = _lang_lock_block(lingua)
+    return f"""{ctx}
+
+{lang_block}Sei un PR manager esperto. Genera un comunicato stampa professionale per questo brand.
+Il comunicato deve essere notiziabile, citabile e ottimizzato per distribuzione digitale.
+
+Un buon comunicato stampa:
+1. Ha un titolo che funziona come headline giornalistico
+2. Il lead risponde a: chi, cosa, quando, dove, perché in 1 paragrafo
+3. Il corpo espande con dettagli verificabili (dati, certificazioni, risultati)
+4. Include una citazione diretta del brand
+5. Termina con il boilerplate (chi è il brand in 3-4 righe)
+6. Ha i contatti media
+
+Rispondi ESCLUSIVAMENTE con questo JSON in {lingua}:
+{{
+  "press_release": {{
+    "titolo": "Headline notiziabile stile giornalistico — max 80 char, include il nome del brand e la notizia",
+    "sottotitolo": "Sub-headline che completa la notizia con un dato concreto — max 120 char",
+    "data_citta": "CITTÀ — [data]",
+    "lead": "Primo paragrafo 60-80 parole: chi + cosa + dato concreto dalle fonti. Usa il nome del brand nella prima frase. Risponde alle 5W (chi, cosa, quando, dove, perché).",
+    "corpo": [
+      "Secondo paragrafo 60-80 parole: dettagli dell'azione o della notizia. Dati verificabili dalle fonti RAG/debrief.",
+      "Terzo paragrafo 50-70 parole: contesto di settore, posizionamento del brand, impatto per il mercato.",
+      "Quarto paragrafo 40-60 parole: disponibilità, prossimi passi, dove trovare il brand."
+    ],
+    "citazione": {{
+      "testo": "Citazione diretta 30-40 parole — suona umana e specifica, non pubblicitaria. Include un dato reale dal debrief.",
+      "attribuzione": "Ruolo/Nome, Azienda (es. 'Fondatore, [Brand]' o 'Ufficio Marketing, [Brand]')"
+    }},
+    "boilerplate": "Chi è [Brand]: 50-70 parole per i media. Include settore, anno fondazione se disponibile, specializzazione, dato differenziante verificabile, URL sito.",
+    "contatti_media": {{
+      "referente": "Ufficio Stampa [Brand] o nome referente",
+      "email": "email dal debrief o 'press@brand.it'",
+      "telefono": "telefono dal debrief o 'da definire'",
+      "url": "URL sito del brand"
+    }},
+    "angolo_notiziabile": "In 1 frase: qual è la notizia reale che giustifica questo comunicato (lancio, premio, apertura, partnership, ricerca, ecc.)",
+    "distribuzione_suggerita": [
+      "Canale di distribuzione 1 (es. PR Newswire Italia)",
+      "Canale 2 (es. comunicato.it)",
+      "Canale 3 (es. agenzie stampa di settore specifiche)"
+    ]
+  }}
+}}
+
+REGOLE ANTI-HALLUCINATION:
+- La notizia deve emergere dai fatti reali del debrief (certificazione, lancio, premio, apertura, ecc.)
+- Se non c'è un evento specifico, usa il posizionamento/lancio del brand come notizia
+- Zero invenzioni: solo dati presenti nel debrief o nelle fonti RAG
+Rispondi SOLO con JSON valido."""
+
+
+def prompt_competitor_geo(ctx: str, competitor_data: str, lingua: str = "italiano") -> str:
+    """v15 — Analisi GEO gap vs competitor."""
+    lang_block = _lang_lock_block(lingua)
+    return f"""{ctx}
+
+{lang_block}
+
+=== DATI ESTRATTI DAI SITI COMPETITOR ===
+{competitor_data}
+=== FINE DATI COMPETITOR ===
+
+Sei un esperto di analisi competitiva GEO (Generative Engine Optimization).
+Analizza i dati dei competitor sopra e confrontali con il brand nel contesto.
+
+Il tuo obiettivo è identificare:
+1. Topic per cui i competitor vengono citati dalle AI che il brand NON copre
+2. Punti di forza del brand che i competitor non hanno (da amplificare)
+3. Keyword e concetti presenti sui siti competitor ma assenti nel brand
+4. Opportunità di schema markup mancanti
+
+L'analisi deve essere SPECIFICA e AZIONABILE, non generica.
+
+Rispondi ESCLUSIVAMENTE con questo JSON in {lingua}:
+{{
+  "competitor_geo_analysis": {{
+    "competitor_analizzati": ["url competitor 1 (o 'non fornito')", "url competitor 2", "url competitor 3"],
+    "riepilogo_competitor": "In 2-3 frasi: qual è il posizionamento complessivo dei competitor analizzati rispetto al brand",
+    "topic_gap": [
+      {{
+        "topic": "Argomento specifico che i competitor coprono e il brand non copre",
+        "perche_importa_per_ai": "Perché questo topic viene citato dalle AI e aumenta la visibilità del brand",
+        "action": "Cosa creare esattamente: tipo di pagina + keyword target + struttura consigliata",
+        "priorita": "alta"
+      }},
+      {{
+        "topic": "Topic gap 2",
+        "perche_importa_per_ai": "Motivazione",
+        "action": "Azione concreta",
+        "priorita": "media"
+      }},
+      {{
+        "topic": "Topic gap 3",
+        "perche_importa_per_ai": "Motivazione",
+        "action": "Azione concreta",
+        "priorita": "media"
+      }}
+    ],
+    "punti_forza_brand_da_amplificare": [
+      {{
+        "elemento": "Elemento unico del brand dal debrief che i competitor NON hanno",
+        "come_comunicarlo_per_ai": "Come trasformarlo in contenuto specificamente citabile dalle AI (tipo di pagina, formato, keyword)"
+      }},
+      {{
+        "elemento": "Elemento unico 2",
+        "come_comunicarlo_per_ai": "Come trasformarlo in contenuto citabile"
+      }}
+    ],
+    "keyword_competitor_mancanti": [
+      "keyword usata nei siti competitor non coperta dal brand",
+      "keyword 2",
+      "keyword 3",
+      "keyword 4",
+      "keyword 5"
+    ],
+    "schema_gap": [
+      "Tipo di schema markup presente nei competitor ma mancante nel brand (es. HowTo, Event, Review)"
+    ],
+    "opportunita_content": [
+      "Tipo di contenuto presente nei competitor (blog, guide, video, FAQ) che il brand non ha e che dovrebbe creare"
+    ],
+    "raccomandazione_prioritaria": "L'azione singola più impattante da implementare entro 1 settimana per superare i competitor in visibilità AI. Specifica: tipo di pagina + keyword + struttura."
+  }}
+}}
+
+REGOLE:
+- Basa l'analisi SOLO sui dati competitor forniti e sui dati del brand nel contesto
+- Se i dati competitor sono limitati, analizza ciò che è disponibile e indica le lacune informative
+- Ogni gap e opportunità deve essere specifica per questo brand, non generica
+Rispondi SOLO con JSON valido."""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SEZIONE 12: API CALL HANDLERS
 # FIX 5 v11: max_tokens garantito >= 4096 per Anthropic, default sicuro 8192
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2925,14 +3345,14 @@ def call_openai(api_key: str, model: str, system: str, user: str) -> tuple:
             max_tokens=max_tok,
             response_format={"type": "json_object"}
         )
-        return resp.choices[0].message.content, resp.usage.prompt_tokens, resp.usage.completion_tokens
+        return resp.choices[0].message.content, resp.usage.prompt_tokens, resp.usage.completion_tokens, 0, 0
     except ImportError:
-        return None, 0, 0
+        return None, 0, 0, 0, 0
     except Exception as e:
         raise e
 
 
-def call_anthropic(api_key: str, model: str, system: str, user: str) -> tuple:
+def call_anthropic(api_key: str, model: str, system: str, user: str, cacheable_prefix: str = "") -> tuple:
     try:
         import anthropic
         client  = anthropic.Anthropic(api_key=api_key)
@@ -2942,26 +3362,37 @@ def call_anthropic(api_key: str, model: str, system: str, user: str) -> tuple:
         # NOTA: il parametro `temperature` è deprecato per i modelli Claude 4.x
         # (Opus 4.7, Sonnet 4.6, Haiku 4.5) e produce 400 invalid_request_error.
         # È stato rimosso: il modello gestisce internamente la randomness.
-        resp    = client.messages.create(
-            model=model,
-            max_tokens=max_tok,
-            system=system,
-            messages=[
-                {"role": "user", "content": user}
-            ]
+
+        # Cache il system prompt — identico per tutte le sezioni della stessa run
+        system_param = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+        # Se cacheable_prefix (ctx), split in blocco cached + blocco istruzioni non cached
+        if cacheable_prefix:
+            messages = [{"role": "user", "content": [
+                {"type": "text", "text": cacheable_prefix, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": user}
+            ]}]
+        else:
+            messages = [{"role": "user", "content": user}]
+
+        resp = client.messages.create(
+            model=model, max_tokens=max_tok,
+            system=system_param, messages=messages
         )
         content = resp.content[0].text
-        return content, resp.usage.input_tokens, resp.usage.output_tokens
+        cache_r = getattr(resp.usage, "cache_read_input_tokens", 0)
+        cache_w = getattr(resp.usage, "cache_creation_input_tokens", 0)
+        return content, resp.usage.input_tokens, resp.usage.output_tokens, cache_r, cache_w
     except ImportError:
-        return None, 0, 0
+        return None, 0, 0, 0, 0
     except Exception as e:
         raise e
 
 
-def call_api(provider, api_key, model, system, user):
+def call_api(provider, api_key, model, system, user, cacheable_prefix=""):
     if provider == "openai":
         return call_openai(api_key, model, system, user)
-    return call_anthropic(api_key, model, system, user)
+    return call_anthropic(api_key, model, system, user, cacheable_prefix)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3008,98 +3439,52 @@ def parse_orario_str(orario_str: str) -> list:
 
 
 def build_final_schema(data: dict, local_seo: dict, azienda: str) -> str:
+    """
+    Restituisce lo schema JSON-LD già costruito da build_schema_markup in post_process,
+    arricchito con eventuali dati local_seo aggiornati (indirizzo, geo, orari, social).
+    Non riduplica la logica: usa il @graph già presente nel dato generato.
+    """
     schema_raw = data.get("schema_markup", {})
-    org        = dict(schema_raw.get("organization", {}))
-    faqs       = data.get("faq", [])
+    graph = list(schema_raw.get("@graph", []))
+
+    if not graph:
+        return json.dumps(schema_raw, ensure_ascii=False, indent=2)
 
     indirizzo = local_seo.get("indirizzo", "").strip()
     gps_lat   = local_seo.get("gps_lat",   "").strip()
     gps_lon   = local_seo.get("gps_lon",   "").strip()
     orari     = local_seo.get("orari",     {})
-    url_sito  = local_seo.get("url",       "https://www.esempio.it").strip()
     linkedin  = local_seo.get("linkedin",  "").strip()
-    vat_id    = local_seo.get("vat_id",    "").strip()  # FIX 4 v11
+    vat_id    = local_seo.get("vat_id",    "").strip()
 
-    schema_type     = "LocalBusiness" if indirizzo else "Organization"
-    org["@type"]    = schema_type
-    org["@context"] = "https://schema.org"
-    org["name"]     = azienda
-    if url_sito: org["url"] = url_sito
+    # Trova il nodo principale (primo elemento del graph = business_entity)
+    entity = dict(graph[0])
 
-    # FIX 4 v11: vatID garantito nel nodo Organization del build_final_schema
-    if vat_id:
-        org["vatID"] = vat_id
-
-    same_as = build_same_as(local_seo)
-    if same_as:
-        org["sameAs"] = same_as
-    elif linkedin:
-        org["sameAs"] = [linkedin]
-
-    if indirizzo:
-        parts = [p.strip() for p in indirizzo.split(",")]
-        org["address"] = {
-            "@type":           "PostalAddress",
-            "streetAddress":   parts[0] if len(parts) > 0 else "",
-            "addressLocality": parts[1] if len(parts) > 1 else "",
-            "postalCode":      parts[2] if len(parts) > 2 else "",
-            "addressRegion":   parts[3] if len(parts) > 3 else "",
-            "addressCountry":  "IT"
-        }
-
-    if gps_lat and gps_lon:
+    # Arricchisce con dati local_seo se presenti e non già nel nodo
+    if indirizzo and "address" not in entity:
+        entity["address"] = parse_address(indirizzo)
+    if gps_lat and gps_lon and "geo" not in entity:
         try:
-            org["geo"] = {
-                "@type":     "GeoCoordinates",
-                "latitude":  float(gps_lat),
+            entity["geo"] = {
+                "@type": "GeoCoordinates",
+                "latitude": float(gps_lat),
                 "longitude": float(gps_lon)
             }
         except ValueError:
             pass
+    if orari and "openingHoursSpecification" not in entity:
+        entity["openingHoursSpecification"] = build_opening_hours_spec(orari)
+    same_as = build_same_as(local_seo)
+    if same_as and "sameAs" not in entity:
+        entity["sameAs"] = same_as
+    elif linkedin and "sameAs" not in entity:
+        entity["sameAs"] = [linkedin]
+    if vat_id and "vatID" not in entity:
+        entity["vatID"] = vat_id
 
-    giorni_map = {
-        "Lunedì": "Monday", "Martedì": "Tuesday", "Mercoledì": "Wednesday",
-        "Giovedì": "Thursday", "Venerdì": "Friday", "Sabato": "Saturday", "Domenica": "Sunday"
-    }
-    oh = []
-    for g_it, orario_val in orari.items():
-        day_en = giorni_map.get(g_it, g_it)
-        if isinstance(orario_val, str):
-            fasce = parse_orario_str(orario_val)
-            for (apertura, chiusura) in fasce:
-                oh.append({
-                    "@type":     "OpeningHoursSpecification",
-                    "dayOfWeek": f"https://schema.org/{day_en}",
-                    "opens":     apertura,
-                    "closes":    chiusura
-                })
-        elif isinstance(orario_val, (tuple, list)) and len(orario_val) == 2:
-            apertura, chiusura = orario_val
-            if apertura and chiusura:
-                oh.append({
-                    "@type":     "OpeningHoursSpecification",
-                    "dayOfWeek": f"https://schema.org/{day_en}",
-                    "opens":     apertura,
-                    "closes":    chiusura
-                })
-    if oh:
-        org["openingHoursSpecification"] = oh
-
-    faq_schema = {
-        "@context": "https://schema.org",
-        "@type":    "FAQPage",
-        "mainEntity": [
-            {
-                "@type": "Question",
-                "name":  f.get("domanda", ""),
-                "acceptedAnswer": {"@type": "Answer", "text": f.get("risposta", "")}
-            }
-            for f in faqs
-        ]
-    }
-
+    graph[0] = entity
     return json.dumps(
-        {"@context": "https://schema.org", "@graph": [org, faq_schema]},
+        {"@context": "https://schema.org", "@graph": graph},
         ensure_ascii=False, indent=2
     )
 
@@ -3202,7 +3587,7 @@ def faq_to_md(faqs):
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
-        page_title="GEO Score™ v14 — The Authority Orchestrator",
+        page_title="GEO Score™ v15 — The Authority Orchestrator",
         page_icon="🐊",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -3245,14 +3630,18 @@ def main():
 
     st.markdown("""
     <div class="geo-header">
-        <h1>🐊 GEO Score™ Content Generator v14 — The Authority Orchestrator</h1>
-        <p>v14: Modelli Anthropic 4.6 · History Persistente · Export per Sezione · AI Summary GEO · E-E-A-T Signals · Edit Inline · Tone of Voice · Schema Store · Framework GEO Score™ by Nico Fioretti</p>
+        <h1>🐊 GEO Score™ Content Generator v15 — The Authority Orchestrator</h1>
+        <p>v15: Tavily RAG · FAQ count 3-15 · Blog Pillar+Cluster · Press Release · Competitor GEO Analysis · API Key Persistente · 25+ Schema Types · History configurabile · Framework GEO Score™ by Nico Fioretti</p>
     </div>
     """, unsafe_allow_html=True)
 
     # ── SIDEBAR ──────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("⚙️ Configurazione API")
+
+        # Carica API key salvate una volta per sessione
+        if "saved_api_keys" not in st.session_state:
+            st.session_state["saved_api_keys"] = load_api_keys()
 
         provider = st.selectbox("Provider AI", ["anthropic", "openai"],
                                 format_func=lambda x: "🟠 Anthropic" if x=="anthropic" else "🟢 OpenAI")
@@ -3266,8 +3655,62 @@ def main():
                              index=opts.index(dflt) if dflt in opts else 0,
                              format_func=lambda m: MODEL_LABELS.get(m, m))
 
+        # Pre-inizializza dal salvataggio solo al primo caricamento per questo provider
+        _ak_state_key = f"api_key_field_{provider}"
+        if _ak_state_key not in st.session_state:
+            st.session_state[_ak_state_key] = st.session_state["saved_api_keys"].get(provider, "")
+
         api_key = st.text_input("🔑 API Key", type="password",
-                                placeholder="sk-... oppure sk-ant-...")
+                                placeholder="sk-... oppure sk-ant-...",
+                                key=_ak_state_key)
+
+        _saved_key_exists = bool(st.session_state["saved_api_keys"].get(provider, ""))
+        _col_k1, _col_k2 = st.columns(2)
+        with _col_k1:
+            if api_key and st.button("💾 Salva chiave", key="save_key_btn", use_container_width=True):
+                st.session_state["saved_api_keys"][provider] = api_key
+                save_api_keys(st.session_state["saved_api_keys"])
+                st.success("✅ Salvata!")
+        with _col_k2:
+            if _saved_key_exists and st.button("🗑️ Rimuovi", key="del_key_btn", use_container_width=True):
+                st.session_state["saved_api_keys"].pop(provider, None)
+                st.session_state.pop(_ak_state_key, None)
+                save_api_keys(st.session_state["saved_api_keys"])
+                st.rerun()
+        if _saved_key_exists:
+            st.caption(f"✅ Chiave {provider} salvata localmente")
+
+        st.divider()
+        st.subheader("🔍 Provider Ricerca Web (RAG)")
+        search_provider = st.radio(
+            "Provider",
+            ["duckduckgo", "tavily"],
+            format_func=lambda x: "DuckDuckGo (gratuito)" if x == "duckduckgo" else "Tavily API (consigliato)",
+            key="search_provider", horizontal=True,
+            help="Tavily produce risultati più ricchi. Gratuito fino a 1000 ricerche/mese."
+        )
+        if search_provider == "tavily":
+            _tv_state_key = "api_key_field_tavily"
+            if _tv_state_key not in st.session_state:
+                st.session_state[_tv_state_key] = st.session_state["saved_api_keys"].get("tavily", "")
+            tavily_api_key = st.text_input("🔑 Tavily API Key", type="password",
+                                           placeholder="tvly-...", key=_tv_state_key)
+            _col_tv1, _col_tv2 = st.columns(2)
+            with _col_tv1:
+                if tavily_api_key and st.button("💾 Salva Tavily", key="save_tavily_btn", use_container_width=True):
+                    st.session_state["saved_api_keys"]["tavily"] = tavily_api_key
+                    save_api_keys(st.session_state["saved_api_keys"])
+                    st.success("✅ Salvata!")
+            with _col_tv2:
+                if st.session_state["saved_api_keys"].get("tavily") and st.button("🗑️ Rimuovi", key="del_tavily_btn", use_container_width=True):
+                    st.session_state["saved_api_keys"].pop("tavily", None)
+                    st.session_state.pop(_tv_state_key, None)
+                    save_api_keys(st.session_state["saved_api_keys"])
+                    st.rerun()
+            st.caption("Ottieni chiave gratuita su tavily.com")
+        else:
+            tavily_api_key = ""
+        st.session_state["tavily_api_key"] = tavily_api_key
 
         st.divider()
 
@@ -3289,11 +3732,18 @@ def main():
         st.divider()
 
         # ── FUNZIONALITÀ B: History Sidebar ──────────────────────────────────
+        st.subheader("🕐 Clienti Salvati")
+        max_history_val = st.number_input(
+            "Max clienti salvati", min_value=10, max_value=500,
+            value=50, step=10, key="max_history",
+            help="Aumenta per archivi grandi. Ogni cliente occupa pochi KB."
+        )
         history = st.session_state.get("client_history", [])
-        if history:
-            st.subheader("🕐 Clienti Salvati")
-            st.caption(f"{len(history)} clienti in archivio · Clicca per ripristinare")
-            for i, entry in enumerate(reversed(history[-50:])):
+        if not history:
+            st.caption("Nessun cliente in archivio — dopo la prima generazione appariranno qui.")
+        else:
+            st.caption(f"{len(history)} clienti in archivio · Clicca per ripristinare tutti i campi")
+            for i, entry in enumerate(reversed(history[-int(max_history_val):])):
                 if st.button(
                     f"🐊 {entry['azienda']}",
                     key=f"hist_{i}",
@@ -3318,7 +3768,7 @@ def main():
                 st.session_state["client_history"] = []
                 save_history([])
                 st.rerun()
-            st.divider()
+        st.divider()
 
         st.markdown("""
         <div class="truth-box">
@@ -3391,18 +3841,18 @@ def main():
         c1, c2 = st.columns(2)
         with c1:
             azienda = st.text_input("Nome Azienda *", key="azienda",
-                                    placeholder="es. Frantoio Muraglia")
+                                    placeholder="es. Studio Legale Rossi · Agenzia SEO Milano · Oleificio Marfuga")
             servizi = st.text_area("Servizi / Prodotti Principali *", key="servizi", height=100,
-                                   placeholder="es. Olio EVO DOP, Frantoiatura, Vendita diretta")
+                                   placeholder="es. Consulenza SEO, Audit Tecnico, Formazione  — oppure: Olio EVO DOP, Frantoiatura, Vendita diretta")
         with c2:
             target  = st.text_area("Target / Clienti Ideali *", key="target", height=100,
-                                   placeholder="es. Ristoratori stellati, gourmet B2C, export EU")
+                                   placeholder="es. PMI italiane 10-50 dipendenti, manager IT  — oppure: ristoratori stellati, gourmet B2C, export EU")
             lingua  = st.selectbox("Lingua Output", ["italiano","inglese","francese","spagnolo"],
                                    key="lingua")
 
         fatti = st.text_area(
             "💡 Fatti Unici & Citabili *", key="fatti", height=130,
-            placeholder='"Premio Flos Olei 2023 · "Blend cultivar Coratina/Ogliarola" · "Acidità 0.18%"'
+            placeholder='"Fondati nel 1998 · 500+ clienti in 12 paesi · Certificazione ISO 9001 · Premio [nome] [anno]"\nFood: "DOP dal 2015 · cultivar Coratina · Premio Flos Olei 2023 · Acidità 0.18%"'
         )
 
         st.divider()
@@ -3584,11 +4034,20 @@ def main():
             gen_service = st.checkbox("📄 Pagina Servizio", value=True, key="gen_service")
             st.caption("H1, come funziona, benefici, CTA")
         with mc3:
-            gen_faq     = st.checkbox("❓ FAQ (5 domande)",  value=True, key="gen_faq")
+            gen_faq     = st.checkbox("❓ FAQ",  value=True, key="gen_faq")
             st.caption("Query AI reali, con fonte per risposta")
         with mc4:
             gen_schema  = st.checkbox("🔗 Schema Markup",   value=True, key="gen_schema")
-            st.caption("JSON-LD LocalBusiness/Org + FAQ")
+            st.caption("JSON-LD auto-type + FAQ + Products")
+
+        if gen_faq:
+            faq_count = st.slider(
+                "Numero domande FAQ", min_value=3, max_value=15, value=5, step=1,
+                key="faq_count",
+                help="3 = rapido · 5 = standard · 10-15 = massima copertura GEO"
+            )
+        else:
+            faq_count = 5
 
         st.caption("🤖 **Moduli GEO Avanzati** — ottimizzazione per citazioni AI generative")
         mc5, mc6, mc7 = st.columns(3)
@@ -3614,8 +4073,43 @@ def main():
             )
             st.caption("Piano azioni esterne per aumentare citazioni AI")
 
+        st.caption("📝 **Content Marketing** — blog, PR, analisi competitor")
+        mc8, mc9, mc10 = st.columns(3)
+        with mc8:
+            gen_blog = st.checkbox(
+                "📝 Blog Pillar + Cluster",
+                value=False,
+                key="gen_blog"
+            )
+            st.caption("Piano: 1 pillar + 3 cluster SEO/GEO")
+        with mc9:
+            gen_pressrelease = st.checkbox(
+                "📰 Comunicato Stampa",
+                value=False,
+                key="gen_pressrelease"
+            )
+            st.caption("Press release per Digital PR e AI citation")
+        with mc10:
+            gen_competitor = st.checkbox(
+                "🔍 Competitor GEO Analysis",
+                value=False,
+                key="gen_competitor"
+            )
+            st.caption("Gap analysis vs competitor per AI visibility")
+
+        if gen_competitor:
+            with st.expander("🔍 URL Competitor da analizzare", expanded=True):
+                st.caption("Inserisci fino a 3 URL competitor. Il tool scaricherà il loro contenuto e analizzerà i gap GEO.")
+                comp_url1 = st.text_input("Competitor 1", key="competitor_url_1",
+                                          placeholder="https://www.competitor1.it")
+                comp_url2 = st.text_input("Competitor 2", key="competitor_url_2",
+                                          placeholder="https://www.competitor2.it")
+                comp_url3 = st.text_input("Competitor 3", key="competitor_url_3",
+                                          placeholder="https://www.competitor3.it")
+
         n_sel = sum([gen_home, gen_service, gen_faq, gen_schema,
-                     gen_answer_first, gen_citation, gen_offsite])
+                     gen_answer_first, gen_citation, gen_offsite,
+                     gen_blog, gen_pressrelease, gen_competitor])
         if n_sel == 0:
             st.warning("Seleziona almeno una sezione.")
 
@@ -3637,8 +4131,10 @@ def main():
         if gen_btn and ready and n_sel > 0:
             sys_p = build_system_prompt(_st, lingua=_ln, tone=_tn)
 
-            total_in  = 0
-            total_out = 0
+            total_in           = 0
+            total_out          = 0
+            total_cache_read   = 0
+            total_cache_created = 0
 
             # FIX 6 v11: reset ESPLICITO di internal_linking_suggestions
             # nel dict generato PRIMA di qualsiasi operazione.
@@ -3692,19 +4188,31 @@ def main():
             if products_debrief:
                 st.info(f"🛒 {len(products_debrief)} prodotti rilevati dal debrief → Product Schema attivo (slug corti v11)")
 
+            _search_provider = st.session_state.get("search_provider", "duckduckgo")
+            _tavily_key      = st.session_state.get("tavily_api_key", "")
+
             if enable_rag and _az:
-                with st.spinner("🌐 Ricerca web multi-query in corso (3 query)..."):
-                    evidence = get_external_evidence(_az)
+                _rag_label = "Tavily" if _search_provider == "tavily" else "DuckDuckGo"
+                with st.spinner(f"🌐 Ricerca web multi-query in corso ({_rag_label})..."):
+                    evidence = get_external_evidence(_az, contesto=_sv,
+                                                     search_provider=_search_provider,
+                                                     tavily_api_key=_tavily_key)
                     rag_evidence_str = format_evidence_for_prompt(evidence)
                     rag_source_urls  = extract_source_urls(evidence, {})
                     all_source_urls.extend(rag_source_urls)
-                    if evidence.get("errori"):
-                        st.warning("⚠️ RAG parziale: " + "; ".join(evidence["errori"][:2]))
-                    elif rag_evidence_str:
-                        n_fonti = len(evidence.get("fonti_aggregate",[]))
-                        st.success(f"✅ RAG: {n_fonti} risultati aggregati da {len(rag_source_urls)} fonti")
-                    else:
-                        st.info("ℹ️ RAG: nessun risultato trovato (proseguo con debrief)")
+                    errori_rag = evidence.get("errori", [])
+                    if errori_rag:
+                        for err in errori_rag[:3]:
+                            st.warning(f"⚠️ RAG: {err}")
+                    if rag_evidence_str:
+                        n_fonti = len(evidence.get("fonti_aggregate", []))
+                        st.success(f"✅ RAG: {n_fonti} fonti aggregate da {len(rag_source_urls)} URL")
+                    elif not errori_rag:
+                        st.info(f"ℹ️ RAG: nessun risultato per '{_az}' — prova ad attivare lo scraping o aggiungi URL manuale")
+                    # Mostra URL scartati se molti (aiuta debug)
+                    n_scartati = len(evidence.get("url_scartati", []))
+                    if n_scartati > 5 and not rag_evidence_str:
+                        st.caption(f"🔍 {n_scartati} URL trovati ma filtrati (il nome azienda non appariva nel titolo/snippet)")
 
             if geo_entities:
                 st.info(f"🗺️ GEO-Entity: {len(geo_entities)} entità geografiche iniettate nel contesto")
@@ -3727,6 +4235,9 @@ def main():
             if gen_answer_first: sections.append("answer_first")
             if gen_citation:     sections.append("citation")
             if gen_offsite:      sections.append("offsite")
+            if gen_blog:         sections.append("blog")
+            if gen_pressrelease: sections.append("pressrelease")
+            if gen_competitor:   sections.append("competitor")
 
             progress = st.progress(0, text="Avvio generazione modulare...")
 
@@ -3739,20 +4250,52 @@ def main():
                     elif section == "servizio":
                         user_p = prompt_servizio(ctx, lingua=_ln)
                     elif section == "faq":
-                        user_p = prompt_faq_hybrid(ctx, lingua=_ln)
+                        _faq_count = st.session_state.get("faq_count", 5)
+                        user_p = prompt_faq_hybrid(ctx, lingua=_ln, faq_count=int(_faq_count))
                     elif section == "schema":
                         faq_data = generated.get("faq", [])
-                        user_p   = prompt_schema(ctx, _az, _loc_enriched, faq_data, lingua=_ln)
+                        user_p   = prompt_schema(ctx, _az, _loc_enriched, faq_data, lingua=_ln, servizi=_sv)
                     elif section == "answer_first":
                         user_p = prompt_answer_first(ctx, lingua=_ln)
                     elif section == "citation":
                         user_p = prompt_citation_block(ctx, lingua=_ln)
                     elif section == "offsite":
                         user_p = prompt_offsite_geo(ctx, lingua=_ln)
+                    elif section == "blog":
+                        user_p = prompt_blog_pillar(ctx, lingua=_ln)
+                    elif section == "pressrelease":
+                        user_p = prompt_press_release(ctx, lingua=_ln)
+                    elif section == "competitor":
+                        # Scraping competitor URLs prima della chiamata AI
+                        _comp_urls = [
+                            st.session_state.get("competitor_url_1", ""),
+                            st.session_state.get("competitor_url_2", ""),
+                            st.session_state.get("competitor_url_3", ""),
+                        ]
+                        _comp_parts = []
+                        for _cu in _comp_urls:
+                            if _cu and _cu.startswith("http"):
+                                with st.spinner(f"🔍 Scraping competitor: {_cu[:50]}..."):
+                                    _cs = scrape_website(_cu)
+                                    if _cs.get("testi"):
+                                        _comp_text = "\n".join(t["testo"][:600] for t in _cs["testi"][:2])
+                                        _comp_parts.append(f"[{_cu}]\n{_comp_text}")
+                        competitor_data = "\n\n---\n".join(_comp_parts) if _comp_parts else "Nessun dato competitor disponibile — inserisci URL validi nella sezione Competitor Analysis."
+                        user_p = prompt_competitor_geo(ctx, competitor_data, lingua=_ln)
                     else:
                         continue
 
-                    raw, in_t, out_t = call_api(provider, api_key, model, sys_p, user_p)
+                    # Per Anthropic: passa ctx come prefisso cached; le istruzioni (senza ctx) come user
+                    if provider == "anthropic":
+                        cache_pfx    = ctx
+                        section_user = user_p[len(ctx):]
+                    else:
+                        cache_pfx    = ""
+                        section_user = user_p
+
+                    raw, in_t, out_t, cache_r, cache_w = call_api(
+                        provider, api_key, model, sys_p, section_user, cacheable_prefix=cache_pfx
+                    )
 
                     if raw is None:
                         call_log.append((section, False, "❌ Libreria non installata: pip install openai anthropic"))
@@ -3762,10 +4305,13 @@ def main():
 
                     if parsed:
                         generated.update(parsed)
-                        total_in  += in_t
-                        total_out += out_t
-                        cst = estimate_cost(in_t, out_t, provider, model)
-                        call_log.append((section, True, f"{in_t+out_t:,} token · ${cst:.5f}"))
+                        total_in            += in_t
+                        total_out           += out_t
+                        total_cache_read    += cache_r
+                        total_cache_created += cache_w
+                        cst = estimate_cost(in_t, out_t, provider, model, cache_r, cache_w)
+                        cache_tag = f" · 💾 {cache_w:,}w/{cache_r:,}r" if (cache_w or cache_r) else ""
+                        call_log.append((section, True, f"{in_t+out_t:,} tok · ${cst:.5f}{cache_tag}"))
                     else:
                         call_log.append((section, False, f"Parsing fallito · Anteprima: {raw[:80] if raw else 'vuoto'}"))
 
@@ -3777,14 +4323,19 @@ def main():
                         break
 
             if generated:
+                # Distingue fonti reali (scraping/RAG verificato) da fonti AI-generate
+                scraped_urls = set(scrape_data_raw.get("url_visitati", []))
+                rag_urls     = set(all_source_urls) - scraped_urls
                 generated["_meta_fonti"] = {
-                    "fonti_rag":       all_source_urls,
-                    "geo_entities":    geo_entities,
-                    "rag_attivo":      enable_rag,
-                    "scraping_attivo": enable_scraping,
-                    "url_scraping":    _loc.get("url",""),
-                    "contacts":        contacts_extracted,
-                    "anno_fondazione": _loc_enriched.get("anno_fondazione",""),
+                    "fonti_rag":            all_source_urls,
+                    "fonti_scraping_reale": list(scraped_urls),
+                    "fonti_rag_web":        list(rag_urls),
+                    "geo_entities":         geo_entities,
+                    "rag_attivo":           enable_rag,
+                    "scraping_attivo":      enable_scraping,
+                    "url_scraping":         _loc.get("url", ""),
+                    "contacts":             contacts_extracted,
+                    "anno_fondazione":      _loc_enriched.get("anno_fondazione", ""),
                 }
 
             if generated:
@@ -3840,11 +4391,13 @@ def main():
 
             progress.progress(100, text="✅ Generazione completata!")
 
-            st.session_state["generated"]         = generated
-            st.session_state["in_tokens"]          = total_in
-            st.session_state["out_tokens"]         = total_out
-            st.session_state["local_seo_enriched"] = _loc_enriched
-            real_tot = estimate_cost(total_in, total_out, provider, model)
+            st.session_state["generated"]           = generated
+            st.session_state["in_tokens"]            = total_in
+            st.session_state["out_tokens"]           = total_out
+            st.session_state["cache_read_tokens"]    = total_cache_read
+            st.session_state["cache_created_tokens"] = total_cache_created
+            st.session_state["local_seo_enriched"]   = _loc_enriched
+            real_tot = estimate_cost(total_in, total_out, provider, model, total_cache_read, total_cache_created)
             st.session_state["real_cost"]  = real_tot
 
             # ── FUNZIONALITÀ B: salva in history v12 ─────────────────────────
@@ -3872,8 +4425,9 @@ def main():
                 # Rimuovi duplicato per stesso nome azienda se già presente
                 history = [h for h in history if h.get("azienda") != _az]
                 history.append(snapshot)
-                st.session_state["client_history"] = history[-50:]  # max 50
-                save_history(st.session_state["client_history"])
+                _max_h = int(st.session_state.get("max_history", 50))
+                st.session_state["client_history"] = history[-_max_h:]
+                save_history(st.session_state["client_history"], max_items=_max_h)
 
             st.markdown("#### 📊 Report per Sezione")
             for sec, ok, info in call_log:
@@ -3881,7 +4435,15 @@ def main():
                 st.markdown(f"{icon} **{sec}** — {info}")
 
             if any(ok for _,ok,_ in call_log):
-                st.success(f"Token totali: **{total_in+total_out:,}** · Costo reale: **${real_tot:.5f}**")
+                cache_line = ""
+                if total_cache_read > 0 and provider == "anthropic":
+                    try:
+                        inp_price = PRICING["anthropic"][model]["input"]
+                        saved = total_cache_read / 1000 * inp_price * 0.90
+                        cache_line = f" · 💾 Cache hit: {total_cache_read:,} tok → risparmio ~${saved:.4f}"
+                    except Exception:
+                        pass
+                st.success(f"Token totali: **{total_in+total_out:,}** · Costo reale: **${real_tot:.5f}**{cache_line}")
                 st.info("👉 Vai al tab **📄 Risultati**")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -3909,15 +4471,28 @@ def main():
 
         qs = data.get("quality_score", {})
         if qs:
-            st.markdown("#### 📊 Quality Score v14")
+            st.markdown("#### 📊 Quality Score v15")
             q1, q2, q3, q4, q5 = st.columns(5)
-            q1.metric("E-E-A-T", f"{qs.get('eeat',0)}/10")
-            q2.metric("SEO",     f"{qs.get('seo', 0)}/10")
-            q3.metric("GEO",     f"{qs.get('geo', 0)}/10")
+            q1.metric("E-E-A-T",  f"{qs.get('eeat',0)}/10")
+            q2.metric("SEO",      f"{qs.get('seo', 0)}/10")
+            q3.metric("GEO",      f"{qs.get('geo', 0)}/10")
             q4.metric("AI-Ready", f"{qs.get('ai_ready',0)}/10")
             risk = qs.get("risk_level", "low")
             risk_icon = "🟢" if risk == "low" else "🟡" if risk == "medium" else "🔴"
             q5.metric("Risk Level", f"{risk_icon} {risk}")
+            # Dettagli aggiuntivi
+            ch = qs.get("cliche_hits", 0)
+            pn = qs.get("product_nodes", 0)
+            detail_parts = []
+            if ch > 0:  detail_parts.append(f"⚠️ {ch} cliché trovati nel testo")
+            if pn > 0:  detail_parts.append(f"✅ {pn} Product node nello schema")
+            meta_f = data.get("_meta_fonti", {})
+            n_scr = len(meta_f.get("fonti_scraping_reale", []))
+            n_rag = len(meta_f.get("fonti_rag_web", []))
+            if n_scr: detail_parts.append(f"🕷️ {n_scr} URL scraping reale")
+            if n_rag: detail_parts.append(f"🌐 {n_rag} URL RAG web")
+            if detail_parts:
+                st.caption(" · ".join(detail_parts))
 
         ai_sum = data.get("ai_summary", "")
         if ai_sum:
@@ -3980,6 +4555,11 @@ def main():
         if data.get("answer_first_page"): avail.append(("🤖 Answer-First","answer_first"))
         if data.get("citation_block"):    avail.append(("📌 Citation Block","citation"))
         if data.get("offsite_geo_plan"):  avail.append(("🌐 Off-site GEO","offsite"))
+        elif st.session_state.get("gen_offsite"):
+            avail.append(("🌐 Off-site GEO ⚠️","offsite_missing"))
+        if data.get("blog_pillar"):       avail.append(("📝 Blog Pillar","blog"))
+        if data.get("press_release"):     avail.append(("📰 Press Release","pressrelease"))
+        if data.get("competitor_geo_analysis"): avail.append(("🔍 Competitor GEO","competitor"))
 
         if not avail:
             st.warning("Nessuna sezione trovata. Ritorna al Generatore.")
@@ -3989,6 +4569,13 @@ def main():
 
         for rtab, (lbl, key) in zip(rtabs, avail):
             with rtab:
+                if key == "offsite_missing":
+                    st.warning("⚠️ La sezione Off-site GEO non è stata generata o il parsing è fallito.")
+                    st.info("Torna al **Generatore**, assicurati che 'Off-site GEO Plan' sia selezionato e riprova. "
+                            "Se il problema persiste, il modello potrebbe aver generato JSON non valido — "
+                            "prova con claude-sonnet-4-6 che produce output strutturati più affidabili.")
+                    st.caption(f"AI-Ready score: -{2} punti finché questa sezione manca.")
+                    continue
                 if key == "home":
                     home = data.get("home", {})
                     render_home(home)
@@ -4261,6 +4848,172 @@ def main():
                         "cp_offsite_json"
                     )
 
+                elif key == "blog":
+                    bp = data["blog_pillar"]
+                    pillar = bp.get("pillar", {})
+
+                    st.markdown("### 📝 Pillar Article")
+                    st.caption("Il pillar è il contenuto più autorevole sul topic principale. I cluster linkano a lui.")
+
+                    col_p1, col_p2 = st.columns(2)
+                    with col_p1:
+                        st.markdown(f"**Titolo:** `{pillar.get('titolo','')}`")
+                        st.markdown(f"**Slug:** `/{pillar.get('url_slug','')}/`")
+                        st.markdown(f"**Keyword principale:** `{pillar.get('keyword_principale','')}`")
+                        st.markdown(f"**Lunghezza target:** {pillar.get('lunghezza_target','')}")
+                    with col_p2:
+                        st.markdown(f"**Meta description:**")
+                        st.info(pillar.get("meta_description",""))
+                        if pillar.get("query_ai_target"):
+                            st.markdown(f"**Query AI target:** _{pillar['query_ai_target']}_")
+
+                    if pillar.get("keyword_secondarie"):
+                        st.markdown("**Keyword secondarie:**")
+                        st.markdown(" · ".join(f"`{k}`" for k in pillar["keyword_secondarie"]))
+
+                    st.divider()
+                    st.markdown("**Struttura H2 del Pillar:**")
+                    for idx_s, sez in enumerate(pillar.get("struttura", []), 1):
+                        with st.expander(f"H2 {idx_s}: {sez.get('h2','')} · {sez.get('word_count_target','')} parole"):
+                            st.markdown(sez.get("contenuto_indicativo",""))
+
+                    if pillar.get("faq_integrate"):
+                        st.markdown("**FAQ integrate nel pillar:**")
+                        for fq in pillar["faq_integrate"]:
+                            st.markdown(f"- _{fq}_")
+
+                    if pillar.get("eeat_signals_da_inserire"):
+                        st.markdown("**Segnali E-E-A-T da inserire:**")
+                        for sig in pillar["eeat_signals_da_inserire"]:
+                            st.markdown(f"✅ {sig}")
+
+                    st.divider()
+                    st.markdown("### 📎 Cluster Articles (×3)")
+                    for idx_c, cluster in enumerate(bp.get("cluster", []), 1):
+                        with st.expander(f"📄 Cluster {idx_c}: {cluster.get('titolo','')}"):
+                            st.markdown(f"**Slug:** `/{cluster.get('url_slug','')}/`")
+                            st.markdown(f"**Keyword target:** `{cluster.get('keyword_target','')}`")
+                            st.markdown(f"**Meta:** {cluster.get('meta_description','')}")
+                            st.markdown(f"**Angolo unico:** {cluster.get('angolo_unico','')}")
+                            if cluster.get("query_ai_target"):
+                                st.markdown(f"**Query AI target:** _{cluster['query_ai_target']}_")
+                            if cluster.get("sezioni_h2"):
+                                st.markdown("**Struttura H2:**")
+                                for h2 in cluster["sezioni_h2"]:
+                                    st.markdown(f"- {h2}")
+                            if cluster.get("link_al_pillar"):
+                                st.markdown(f"**Link al pillar:** {cluster['link_al_pillar']}")
+
+                    if bp.get("content_calendar_note"):
+                        st.info(f"📅 {bp['content_calendar_note']}")
+
+                    copy_box(
+                        "📋 Copia Blog Pillar Plan (JSON)",
+                        json.dumps(bp, ensure_ascii=False, indent=2),
+                        "cp_blog_json"
+                    )
+
+                elif key == "pressrelease":
+                    pr = data["press_release"]
+
+                    st.markdown("### 📰 Comunicato Stampa")
+                    st.caption("Pronto per distribuzione digitale e ottimizzato per citabilità AI.")
+
+                    st.markdown(f"## {pr.get('titolo','')}")
+                    if pr.get("sottotitolo"):
+                        st.markdown(f"*{pr['sottotitolo']}*")
+                    st.caption(pr.get("data_citta",""))
+                    st.divider()
+
+                    st.markdown(pr.get("lead",""))
+                    for paragrafo in pr.get("corpo", []):
+                        st.markdown(paragrafo)
+
+                    citazione = pr.get("citazione", {})
+                    if citazione.get("testo"):
+                        st.markdown(f"\n> *\"{citazione['testo']}\"*")
+                        st.caption(f"— {citazione.get('attribuzione','')}")
+
+                    st.divider()
+                    if pr.get("boilerplate"):
+                        st.markdown("**Chi siamo (boilerplate per media):**")
+                        st.info(pr["boilerplate"])
+
+                    contatti = pr.get("contatti_media", {})
+                    if contatti:
+                        st.markdown("**Contatti media:**")
+                        st.markdown(f"- Referente: {contatti.get('referente','')}")
+                        if contatti.get("email"): st.markdown(f"- Email: {contatti['email']}")
+                        if contatti.get("telefono"): st.markdown(f"- Tel: {contatti['telefono']}")
+                        if contatti.get("url"): st.markdown(f"- Web: {contatti['url']}")
+
+                    if pr.get("angolo_notiziabile"):
+                        st.markdown(f"**Notizia principale:** _{pr['angolo_notiziabile']}_")
+
+                    if pr.get("distribuzione_suggerita"):
+                        with st.expander("📡 Canali di distribuzione suggeriti"):
+                            for canale in pr["distribuzione_suggerita"]:
+                                st.markdown(f"- {canale}")
+
+                    # Copy box testo completo formattato
+                    pr_testo = f"{pr.get('titolo','')}\n{pr.get('sottotitolo','')}\n\n{pr.get('data_citta','')}\n\n{pr.get('lead','')}\n\n"
+                    pr_testo += "\n\n".join(pr.get("corpo",[]))
+                    if citazione.get("testo"):
+                        pr_testo += f"\n\n\"{citazione['testo']}\" — {citazione.get('attribuzione','')}"
+                    pr_testo += f"\n\n###\n\n{pr.get('boilerplate','')}"
+                    copy_box("📋 Copia comunicato stampa (testo)", pr_testo, "cp_pr_text")
+                    copy_box("📋 Copia comunicato stampa (JSON)", json.dumps(pr, ensure_ascii=False, indent=2), "cp_pr_json")
+
+                elif key == "competitor":
+                    cga = data["competitor_geo_analysis"]
+
+                    st.markdown("### 🔍 Competitor GEO Analysis")
+                    st.caption("Analisi gap di contenuto e visibilità AI rispetto ai competitor.")
+
+                    if cga.get("riepilogo_competitor"):
+                        st.info(cga["riepilogo_competitor"])
+
+                    topic_gap = cga.get("topic_gap", [])
+                    if topic_gap:
+                        st.markdown("#### 🎯 Topic Gap — Argomenti da creare")
+                        for gap in topic_gap:
+                            priority_icon = "🔴" if gap.get("priorita") == "alta" else "🟡" if gap.get("priorita") == "media" else "🟢"
+                            with st.expander(f"{priority_icon} {gap.get('topic','')}"):
+                                st.markdown(f"**Perché conta per le AI:** {gap.get('perche_importa_per_ai','')}")
+                                st.markdown(f"**Azione concreta:** {gap.get('action','')}")
+
+                    punti_forza = cga.get("punti_forza_brand_da_amplificare", [])
+                    if punti_forza:
+                        st.markdown("#### 💪 Punti di Forza da Amplificare")
+                        for pf in punti_forza:
+                            with st.expander(f"✨ {pf.get('elemento','')}"):
+                                st.markdown(pf.get("come_comunicarlo_per_ai",""))
+
+                    kw_mancanti = cga.get("keyword_competitor_mancanti", [])
+                    if kw_mancanti:
+                        st.markdown("#### 🔑 Keyword dei Competitor non coperte")
+                        st.markdown(" · ".join(f"`{k}`" for k in kw_mancanti))
+
+                    if cga.get("schema_gap"):
+                        st.markdown("#### 🏷️ Schema Markup Gap")
+                        for sg in cga["schema_gap"]:
+                            st.markdown(f"- {sg}")
+
+                    if cga.get("opportunita_content"):
+                        st.markdown("#### 📄 Opportunità Content")
+                        for oc in cga["opportunita_content"]:
+                            st.markdown(f"- {oc}")
+
+                    if cga.get("raccomandazione_prioritaria"):
+                        st.markdown("#### 🚀 Raccomandazione Prioritaria")
+                        st.warning(cga["raccomandazione_prioritaria"])
+
+                    copy_box(
+                        "📋 Copia Competitor Analysis (JSON)",
+                        json.dumps(cga, ensure_ascii=False, indent=2),
+                        "cp_competitor_json"
+                    )
+
         st.divider()
 
         with st.expander("🔧 JSON Raw completo (debug / sviluppatori)"):
@@ -4271,7 +5024,7 @@ def main():
                 "azienda":   _az,
                 "provider":  provider,
                 "model":     model,
-                "version":   "v14",
+                "version":   "v15",
                 "tone":      st.session_state.get("tone","bilanciato"),
                 "in_tokens": in_t,
                 "out_tokens":out_t,
